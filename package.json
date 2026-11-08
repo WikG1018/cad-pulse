@@ -2,6 +2,13 @@
   "name": "cad-pulse",
   "private": true,
   "version": "0.1.0",
+  "description": "Always-on-top single-core-aware performance monitor for AutoCAD — tray, HUD overlay, auto diagnosis",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WikG1018/cad-pulse"
+  },
+  "keywords": ["autocad", "performance-monitor", "tauri", "react", "rust", "windows"],
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -46,7 +46,9 @@ CAD Pulse 为此而生：
 
 ## 下载安装
 
-从 [**Releases**](../../releases) 下载 `CAD.Pulse_x.x.x_x64-setup.exe`（约 2 MB）安装即可。无需配置，打开 AutoCAD 后自动开始监控。
+从 [**Releases**](https://github.com/WikG1018/cad-pulse/releases) 下载 `CAD.Pulse_x.x.x_x64-setup.exe`（约 2 MB）安装即可。无需配置，打开 AutoCAD 后自动开始监控。
+
+> 💡 安装包未做代码签名（个人开源项目），Windows SmartScreen 可能弹窗「已保护你的电脑」——点「更多信息 → 仍要运行」即可；也可选择校验 MSI。
 
 > GPU 指标依赖 NVIDIA 驱动（NVML）；无 N 卡时自动隐藏 GPU 卡。系统需求：Windows 10/11 x64。
 

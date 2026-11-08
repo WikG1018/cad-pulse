@@ -1,0 +1,624 @@
+/* ============================================================
+   CAD Pulse · design tokens v2 — see DESIGN.md (quality gate)
+   Architecture: shadcn-style semantic HSL-channel tokens.
+   ============================================================ */
+:root {
+  /* semantic layer */
+  --background: 253 42% 8%;
+  --foreground: 213 30% 91%;
+  --muted-foreground: 217 15% 62%;
+  --faint-foreground: 217 10% 45%;
+  --card: 250 35% 12%;
+  --border: 258 84% 60%;
+  --border-dim: 258 60% 40%;
+  --border-strong: 258 90% 68%;
+  --ring: 258 90% 68%;
+
+  /* data series — three separated hues, all ≥7.9:1 on background */
+  --cpu: 199 98% 60%;
+  --mem: 173 66% 56%;
+  --gpu: 293 85% 74%;
+
+  /* status — lights/diagnosis/tray ring only, never for chart lines */
+  --ok: 158 64% 55%;
+  --warn: 43 96% 57%;
+  --danger: 2 92% 68%;
+  --muted: 245 10% 60%;
+  --brand: 258 90% 66%;
+
+  /* legacy aliases (kept until full migration) */
+  --text: hsl(var(--foreground));
+  --text-dim: hsl(var(--muted-foreground));
+  --text-faint: hsl(var(--faint-foreground));
+  --bg: hsl(var(--background));
+  --bg-panel: hsl(var(--card) / 0.72);
+  --bg-card: hsl(var(--card) / 0.55);
+  --bg-card-hover: hsl(250 38% 20% / 0.65);
+
+  --font-num: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+  --font-ui: "Inter Variable", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+
+  --radius: 16px;
+  --radius-sm: 12px;
+  --radius-xs: 8px;
+
+  /* motion durations double as semantics */
+  --t-micro: 120ms;
+  --t-ui: 200ms;
+  --t-data: 350ms;
+
+  --shadow-ambient: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --highlight-top: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root { height: 100%; background: transparent; }
+
+body {
+  font-family: var(--font-ui);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+.num {
+  font-family: var(--font-num);
+  font-feature-settings: "tnum" 1, "lnum" 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+/* faint engineering grid — the CAD wink */
+.grid-bg {
+  background-image:
+    linear-gradient(hsl(var(--brand) / 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, hsl(var(--brand) / 0.05) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* ============================================================
+   Glass mode — native acrylic does the real blur; roots go
+   near-transparent with a lit top edge (dark glass slab).
+   ============================================================ */
+.glass .hud-root,
+.glass .hud-mini {
+  background: hsl(var(--background) / 0.34);
+  box-shadow:
+    inset 0 1px 0 rgba(226, 232, 240, 0.14),
+    var(--shadow-ambient);
+}
+.glass .dash-root { background: hsl(var(--background) / 0.42); }
+
+/* ============================================================
+   Cards — gradient border (top lit → bottom dark) + inner
+   highlight + hover lift. Canvas stays quiet; data glows.
+   ============================================================ */
+.metric-card,
+.dash-card,
+.diag-card,
+.cheat-card {
+  position: relative;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(hsl(var(--card) / 0.55), hsl(var(--card) / 0.55)) padding-box,
+    linear-gradient(
+      180deg,
+      hsl(var(--border) / 0.62),
+      hsl(var(--border-dim) / 0.3)
+    ) border-box;
+  box-shadow: var(--highlight-top);
+  transition:
+    transform var(--t-ui) ease-out,
+    background var(--t-ui) ease-out,
+    box-shadow var(--t-ui) ease-out;
+  animation: card-in var(--t-data) cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--card-index, 0) * 40ms);
+}
+
+.metric-card:hover,
+.dash-card:hover,
+.diag-card:hover,
+.cheat-card:hover {
+  background:
+    linear-gradient(hsl(var(--card) / 0.78), hsl(var(--card) / 0.78)) padding-box,
+    linear-gradient(
+      180deg,
+      hsl(var(--border-strong) / 0.9),
+      hsl(var(--border-dim) / 0.5)
+    ) border-box;
+  transform: translateY(-1px);
+}
+
+.glass .metric-card,
+.glass .dash-card,
+.glass .diag-card,
+.glass .cheat-card {
+  background:
+    linear-gradient(hsl(var(--card) / 0.38), hsl(var(--card) / 0.38)) padding-box,
+    linear-gradient(
+      180deg,
+      hsl(var(--border) / 0.45),
+      hsl(var(--border-dim) / 0.22)
+    ) border-box;
+}
+
+/* mouse spotlight on dashboard cards — Aceternity technique, CSS-only */
+.dash-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--t-ui) ease-out;
+  background: radial-gradient(
+    240px circle at var(--mx, 50%) var(--my, 50%),
+    hsl(var(--brand) / 0.08),
+    transparent 65%
+  );
+}
+.dash-card:hover::after { opacity: 1; }
+
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* sparkline endpoint breathing dot */
+.spark-dot { animation: breathe 1.6s ease-in-out infinite; }
+@keyframes breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* ============================================================
+   HUD (always-on-top overlay)
+   ============================================================ */
+.hud-root {
+  width: 100vw;
+  height: 100vh;
+  border-radius: var(--radius);
+  background: hsl(var(--background) / 0.85);
+  border: 1px solid hsl(var(--border) / 0.35);
+  box-shadow:
+    var(--highlight-top),
+    var(--shadow-ambient);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.hud-titlebar {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px 0 12px;
+  border-bottom: 1px solid hsl(var(--border-dim) / 0.25);
+  cursor: default;
+}
+
+.hud-logo {
+  color: hsl(var(--brand));
+  font-size: 13px;
+  text-shadow: 0 0 8px hsl(var(--brand) / 0.45);
+}
+
+.hud-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.badge-demo {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--gpu) / 0.45);
+  color: hsl(var(--gpu));
+  letter-spacing: 0.08em;
+}
+
+.icon-btn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  transition: color var(--t-micro) ease-out, background var(--t-micro) ease-out;
+}
+.icon-btn:hover { color: var(--text); background: hsl(var(--brand) / 0.15); }
+.icon-btn:focus-visible, .pill-btn:focus-visible, select.pill:focus-visible {
+  outline: 2px solid hsl(var(--ring) / 0.7);
+  outline-offset: 1px;
+}
+
+/* status line */
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid hsl(var(--border-dim) / 0.25);
+  transition: background var(--t-micro) ease-out;
+}
+.status-line:hover { background: hsl(var(--brand) / 0.08); }
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.dot.ok { background: hsl(var(--ok)); box-shadow: 0 0 8px hsl(var(--ok) / 0.9); }
+.dot.warn { background: hsl(var(--warn)); box-shadow: 0 0 8px hsl(var(--warn) / 0.9); }
+.dot.danger { background: hsl(var(--danger)); box-shadow: 0 0 8px hsl(var(--danger) / 0.9); animation: pulse 1.1s ease-in-out infinite; }
+.dot.muted { background: hsl(var(--muted)); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.status-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.status-arrow { color: var(--text-faint); font-size: 11px; }
+
+/* metric cards */
+.hud-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 10px 12px 8px;
+  flex: 1;
+  min-height: 0;
+}
+
+.metric-card { padding: 8px 10px 6px; display: flex; flex-direction: column; }
+.metric-card-fill .spark-fill { flex: 1; min-height: 22px; display: flex; }
+
+.metric-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.metric-value { font-size: 24px; font-weight: 600; line-height: 1.1; }
+.metric-unit { font-size: 12px; color: var(--text-dim); margin-left: 3px; font-weight: 400; }
+.metric-sub { font-size: 10px; color: var(--text-faint); white-space: nowrap; }
+
+/* per-core strip inside HUD */
+.cores-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 2px;
+  height: 44px;
+}
+
+/* hud bottom strip */
+.hud-strip {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 12px 10px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.strip-item { display: flex; align-items: center; gap: 5px; }
+.strip-item .num { color: var(--text); font-size: 11px; }
+
+/* collapsed mini hud */
+.hud-mini {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 12px;
+  background: hsl(var(--background) / 0.88);
+  border: 1px solid hsl(var(--border) / 0.35);
+  box-shadow: var(--highlight-top), var(--shadow-ambient);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px 0 10px;
+  cursor: default;
+}
+.hud-mini .num { font-size: 15px; font-weight: 600; }
+
+/* ============================================================
+   Dashboard
+   ============================================================ */
+.dash-root {
+  width: 100vw;
+  height: 100vh;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.dash-titlebar {
+  height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 0 16px;
+  border-bottom: 1px solid hsl(var(--border-dim) / 0.25);
+  flex: none;
+}
+
+.dash-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--border-dim) / 0.4);
+  background: hsl(var(--card) / 0.55);
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.pill .num { color: var(--text); }
+
+.dash-toolbar { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+select.pill, .pill-btn {
+  appearance: none;
+  background: hsl(var(--card) / 0.55);
+  color: var(--text);
+  border: 1px solid hsl(var(--border-dim) / 0.4);
+  border-radius: var(--radius-xs);
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  outline: none;
+  transition: border-color var(--t-micro) ease-out, background var(--t-micro) ease-out;
+}
+select.pill:hover, .pill-btn:hover { border-color: hsl(var(--border) / 0.6); }
+
+.pill-btn.primary {
+  border-color: hsl(var(--brand) / 0.55);
+  color: hsl(258 80% 86%);
+  background: hsl(var(--brand) / 0.16);
+}
+.pill-btn.primary:hover { background: hsl(var(--brand) / 0.28); }
+
+/* segmented control */
+.segment {
+  display: inline-flex;
+  border: 1px solid hsl(var(--border-dim) / 0.4);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+  height: 26px;
+}
+.segment button {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 0 10px;
+  cursor: pointer;
+  transition: background var(--t-micro) ease-out, color var(--t-micro) ease-out;
+}
+.segment button.active {
+  background: hsl(var(--brand) / 0.22);
+  color: var(--text);
+}
+.segment button:focus-visible { outline: 2px solid hsl(var(--ring) / 0.7); outline-offset: -2px; }
+
+.dash-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.dash-card { padding: 12px 14px 10px; }
+.dash-card .metric-value { font-size: 30px; }
+.dash-card .spark { margin-top: 6px; }
+
+.card-stats {
+  display: flex;
+  gap: 14px;
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--text-faint);
+  flex-wrap: wrap;
+}
+.card-stats .num { color: var(--text-dim); }
+
+.io-line {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--text-faint);
+  display: flex;
+  gap: 12px;
+}
+.io-line .num { color: var(--text-dim); }
+
+/* diagnosis card */
+.diag-card { padding: 12px 14px; }
+.diag-card.ok { --border-dim: 158 64% 55%; }
+.diag-card.warn { --border-dim: 43 96% 57%; }
+.diag-card.danger { --border-dim: 2 92% 68%; }
+
+.diag-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.diag-title { font-size: 14px; font-weight: 700; }
+
+.diag-advice {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 20px;
+}
+.diag-advice li {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding-left: 14px;
+  position: relative;
+  line-height: 1.5;
+}
+.diag-advice li::before {
+  content: "▸";
+  position: absolute;
+  left: 0;
+  color: hsl(var(--brand));
+}
+
+/* cheat sheet */
+.cheat-card { padding: 12px 14px; }
+.cheat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px 16px;
+  margin-top: 8px;
+}
+.cheat-item { display: flex; flex-direction: column; gap: 2px; }
+.cheat-cmd {
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: hsl(var(--cpu));
+  background: hsl(var(--cpu) / 0.08);
+  border: 1px solid hsl(var(--cpu) / 0.2);
+  border-radius: 6px;
+  padding: 3px 8px;
+  align-self: flex-start;
+}
+.cheat-desc { font-size: 11px; color: var(--text-faint); line-height: 1.4; }
+
+.dash-bottom {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: 12px;
+  align-items: start;
+}
+
+.diag-card-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.diag-card-wrap .diag-card,
+.diag-card-wrap .cheat-card { margin: 0; }
+
+/* waiting state */
+.waiting {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-dim);
+}
+.waiting .ring-idle { animation: spin 6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ============================================================
+   Core bars (per-logical-core live load)
+   ============================================================ */
+.core-bars { display: flex; align-items: flex-end; width: 100%; }
+.core-bar-slot {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.core-bar-fill {
+  width: 100%;
+  min-height: 3px;
+  border-radius: 1.5px;
+  transition: height 0.4s ease;
+}
+.core-bar-num { font-size: 8px; color: var(--text-faint); font-family: var(--font-num); line-height: 1; }
+
+.cores-card { display: flex; align-items: stretch; gap: 16px; }
+.cores-main { flex: 1; min-width: 0; }
+.cores-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+  flex: none;
+}
+.side-stat { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.side-stat .num { font-size: 14px; }
+.side-stat .label { font-size: 9px; }
+
+/* ============================================================
+   Event log
+   ============================================================ */
+.event-log {
+  max-height: 168px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 8px;
+}
+.event-row { display: flex; align-items: center; gap: 8px; font-size: 11px; min-width: 0; }
+.event-time { color: var(--text-faint); font-size: 10px; flex: none; }
+.event-text { color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.event-empty { font-size: 11px; color: var(--text-faint); padding: 12px 0; text-align: center; }
+
+.freq-pill { display: inline-flex; align-items: baseline; gap: 4px; }
+.freq-pill .num { font-size: 11px; color: var(--text); }
+.freq-pill .unit { font-size: 9px; color: var(--text-faint); }
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-thumb { background: hsl(var(--brand) / 0.25); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* accessibility: honor reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

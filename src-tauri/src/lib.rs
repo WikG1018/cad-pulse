@@ -16,14 +16,47 @@ const GLASS_TINT: (u8, u8, u8, u8) = (22, 15, 46, 170);
 
 fn try_apply_glass(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("hud") {
+        round_window_corners(&w);
         let ok = window_vibrancy::apply_acrylic(&w, Some(GLASS_TINT)).is_ok();
         GLASS_HUD.store(ok, Ordering::Relaxed);
     }
     if let Some(w) = app.get_webview_window("dashboard") {
+        round_window_corners(&w);
         let ok = window_vibrancy::apply_acrylic(&w, Some(GLASS_TINT)).is_ok();
         GLASS_DASH.store(ok, Ordering::Relaxed);
     }
 }
+
+/// Acrylic fills the whole window rect, which would show as square corners
+/// behind the rounded CSS surface. Ask DWM to clip the window itself into a
+/// rounded shape (Windows 11; ignored silently where unsupported).
+#[cfg(windows)]
+fn round_window_corners(window: &tauri::WebviewWindow) {
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_ROUND: u32 = 2;
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: isize,
+            attr: u32,
+            value: *const core::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    let Ok(hwnd) = window.hwnd() else { return };
+    let pref: u32 = DWMWCP_ROUND;
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd.0 as isize,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const u32 as *const core::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn round_window_corners(_window: &tauri::WebviewWindow) {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

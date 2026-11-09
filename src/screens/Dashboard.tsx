@@ -150,6 +150,7 @@ export default function Dashboard() {
               secondary={scale === "single" ? { data: coreData, max: 100 } : undefined}
               footer={
                 <div className="card-stats">
+                  <span>{scale === "single" ? "总量" : "单核"} <span className="num">{fmtPct(scale === "single" ? latest.cpu_total_pct : latest.cpu_single_pct)}%</span></span>
                   <span>峰值 <span className="num">{fmtPct(cpu5.peak)}%</span></span>
                   <span>均值 <span className="num">{fmtPct(cpu5.avg)}%</span></span>
                   <span>频率 <span className="num">{(latest.cpu_freq_mhz / 1000).toFixed(2)} GHz</span></span>

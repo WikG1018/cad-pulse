@@ -13,6 +13,7 @@ import Ring from "../components/Ring";
 const win = getCurrentWebviewWindow();
 const EXPANDED = { w: 310, h: 318 };
 const COLLAPSED = { w: 150, h: 46 };
+const SEEN_KEY = "cadpulse-seen-dashboard";
 
 export default function Hud() {
   const { latest, history } = useStats();
@@ -23,6 +24,19 @@ export default function Hud() {
     const { w, h } = collapsed ? COLLAPSED : EXPANDED;
     win.setSize(new LogicalSize(w, h)).catch(() => {});
   }, [collapsed]);
+
+  // First launch ever: open the dashboard once so the full feature set is
+  // discoverable (the HUD alone undersells it).
+  useEffect(() => {
+    try {
+      if (!localStorage.getItem(SEEN_KEY)) {
+        localStorage.setItem(SEEN_KEY, "1");
+        invoke("open_dashboard").catch(() => {});
+      }
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
 
   const diag = useMemo(() => diagnose(history), [history]);
   const cpuData = useMemo(() => series(history, (s) => s.cpu_single_pct, 60), [history]);
@@ -81,6 +95,13 @@ export default function Hud() {
           <span className="hud-title">CAD Pulse</span>
           {latest.demo && <span className="badge-demo">演示</span>}
           <div style={{ marginLeft: "auto" }} data-tauri-drag-region>
+            <button
+              className="icon-btn"
+              title="打开详情面板（托盘左键同效）"
+              onClick={() => invoke("open_dashboard")}
+            >
+              ▣
+            </button>
             <button className="icon-btn" title="折叠" onClick={() => setCollapsed(true)}>
               ─
             </button>
@@ -100,7 +121,7 @@ export default function Hud() {
           <>
             <div className="hud-cards">
               <MetricCard
-                label="CPU"
+                label="CPU 单核"
                 value={fmtPct(latest.cpu_single_pct)}
                 animValue={latest.cpu_single_pct}
                 format={(v) => fmtPct(v)}
@@ -108,7 +129,7 @@ export default function Hud() {
                 color="var(--cpu)"
                 data={cpuData}
                 max={100}
-                sub={`峰 ${fmtPct(cpuPeak)}%`}
+                sub={`总量 ${fmtPct(latest.cpu_total_pct)}% · 峰 ${fmtPct(cpuPeak)}%`}
                 autoSpark
               />
               <MetricCard
@@ -126,7 +147,7 @@ export default function Hud() {
             </div>
 
             <div className="cores-strip">
-              <span className="label" style={{ flex: "none" }}>CORES</span>
+              <span className="label" style={{ flex: "none" }}>{latest.cores.length} 核</span>
               <CoreBars cores={latest.cores} height={30} gap={2} />
             </div>
 

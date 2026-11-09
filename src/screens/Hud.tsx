@@ -168,7 +168,7 @@ export default function Hud() {
                   <span className="num">{latest.gpu_temp_c}°</span>
                 </span>
               )}
-              <span className="strip-item freq-pill">
+              <span className="strip-item freq-pill" title="最高核实时频率（睿频）">
                 <span className="num">{(latest.cpu_freq_mhz / 1000).toFixed(1)}</span>
                 <span className="unit">GHz</span>
               </span>

@@ -95,6 +95,270 @@ fn now_ts() -> u64 {
         .unwrap_or(0)
 }
 
+// ---------------------------------------------------------------------------
+// Live CPU frequency (Windows)
+//
+// `CallNtPowerInformation.CurrentMhz` and sysinfo's `frequency()` both report
+// the static base clock on modern Intel/AMD (HWP) parts — a 14600KF forever
+// reads 3.5 GHz instead of boosting to 5.3. Task Manager computes the real
+// clock as base × "% Processor Performance" (a PDH counter that exceeds 100%
+// while boosting). We do the same and take the busiest processor group/core.
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+mod live_freq {
+    use std::sync::{Mutex, OnceLock};
+
+    const PDH_FMT_DOUBLE: u32 = 0x200;
+    const PROCESSOR_INFORMATION: u32 = 11;
+
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct ProcessorPowerInformation {
+        number: u32,
+        max_mhz: u32,
+        current_mhz: u32,
+        mhz_limit: u32,
+        max_idle_state: u32,
+        current_idle_state: u32,
+    }
+
+    #[repr(C)]
+    struct FmtValue {
+        c_status: u32,
+        pad: u32,
+        value: f64, // union: double sits at offset 8
+    }
+
+    #[link(name = "powrprof")]
+    unsafe extern "system" {
+        fn CallNtPowerInformation(
+            level: u32,
+            input: *const core::ffi::c_void,
+            input_size: u32,
+            output: *mut core::ffi::c_void,
+            output_size: u32,
+        ) -> i32;
+    }
+
+    #[link(name = "pdh")]
+    unsafe extern "system" {
+        fn PdhOpenQueryW(source: *const u16, user: usize, query: *mut isize) -> i32;
+        fn PdhAddEnglishCounterW(
+            query: isize,
+            path: *const u16,
+            user: usize,
+            counter: *mut isize,
+        ) -> i32;
+        fn PdhCollectQueryData(query: isize) -> i32;
+        fn PdhGetFormattedCounterValue(
+            counter: isize,
+            format: u32,
+            counter_type: *mut u32,
+            value: *mut FmtValue,
+        ) -> i32;
+        fn PdhExpandWildCardPathW(
+            data_source: *const u16, // null = live data
+            wildcard: *const u16,
+            buffer: *mut u16,
+            length: *mut u32,
+            detail_level: u32, // PERF_DETAIL_*
+        ) -> u32;
+        fn PdhCloseQuery(query: isize) -> i32;
+    }
+
+    struct PdhState {
+        query: isize,
+        counters: Vec<isize>,
+    }
+
+    fn pdh() -> Option<&'static Mutex<Option<PdhState>>> {
+        static S: OnceLock<Mutex<Option<PdhState>>> = OnceLock::new();
+        Some(S.get_or_init(|| {
+            // Expand the wildcard into per-core paths, then add each one as
+            // its own counter — single-value reads are far more reliable than
+            // PdhGetFormattedCounterArrayW on multi-wildcard paths.
+            let wildcard: Vec<u16> = "\\Processor Information(*)\\% Processor Performance"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut len: u32 = 0;
+            const PDH_MORE_DATA: u32 = 0x8000_07D2;
+            const PERF_DETAIL_WIZARD: u32 = 400;
+            let rc = unsafe {
+                PdhExpandWildCardPathW(
+                    std::ptr::null(),
+                    wildcard.as_ptr(),
+                    std::ptr::null_mut(),
+                    &mut len,
+                    PERF_DETAIL_WIZARD,
+                )
+            };
+            if rc != PDH_MORE_DATA || len < 2 {
+                return Mutex::new(None);
+            }
+            let mut buf = vec![0u16; len as usize];
+            let rc2 = unsafe {
+                PdhExpandWildCardPathW(
+                    std::ptr::null(),
+                    wildcard.as_ptr(),
+                    buf.as_mut_ptr(),
+                    &mut len,
+                    PERF_DETAIL_WIZARD,
+                )
+            };
+            if rc2 != 0 {
+                return Mutex::new(None);
+            }
+            // msz list: NUL-separated, double-NUL terminated. Re-add the NUL
+            // terminator to each path — PDH reads until NUL, without it we
+            // read out of bounds.
+            let paths: Vec<Vec<u16>> = buf[..len.min(buf.len() as u32) as usize]
+                .split(|&c| c == 0)
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let mut v = p.to_vec();
+                    v.push(0);
+                    v
+                })
+                .collect();
+
+            let mut query = 0isize;
+            if unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut query) } != 0 {
+                return Mutex::new(None);
+            }
+            let mut counters = Vec::new();
+            for p in paths {
+                let s = String::from_utf16_lossy(&p);
+                if s.contains("_Total") {
+                    continue;
+                }
+                let mut c = 0isize;
+                if unsafe { PdhAddEnglishCounterW(query, p.as_ptr(), 0, &mut c) } == 0 {
+                    counters.push(c);
+                }
+            }
+            if counters.is_empty() {
+                unsafe { PdhCloseQuery(query) };
+                return Mutex::new(None);
+            }
+            Mutex::new(Some(PdhState { query, counters }))
+        }))
+    }
+
+    /// Base clock (MaxMhz) from the power manager; constant per boot.
+    fn base_mhz(core_count: usize) -> u64 {
+        static BASE: OnceLock<u64> = OnceLock::new();
+        *BASE.get_or_init(|| {
+            let count = core_count.clamp(1, 128);
+            let mut buf = vec![ProcessorPowerInformation::default(); count];
+            let size = (count * std::mem::size_of::<ProcessorPowerInformation>()) as u32;
+            let ok = unsafe {
+                CallNtPowerInformation(
+                    PROCESSOR_INFORMATION,
+                    std::ptr::null(),
+                    0,
+                    buf.as_mut_ptr().cast(),
+                    size,
+                ) == 0
+            };
+            if ok {
+                buf.iter().map(|i| i.max_mhz as u64).max().unwrap_or(0)
+            } else {
+                0
+            }
+        })
+    }
+
+    /// Highest per-core "% Processor Performance" (>100% while boosting).
+    /// Needs two collect rounds; returns None on the very first call.
+    fn max_performance_pct() -> Option<f64> {
+        let guard = pdh()?.lock().ok()?;
+        let st = guard.as_ref()?;
+        unsafe {
+            if PdhCollectQueryData(st.query) != 0 {
+                return None;
+            }
+            let mut max: f64 = 0.0;
+            let mut got_any = false;
+            let mut value: FmtValue = std::mem::zeroed();
+            for &c in &st.counters {
+                if PdhGetFormattedCounterValue(c, PDH_FMT_DOUBLE, std::ptr::null_mut(), &mut value)
+                    != 0
+                {
+                    continue;
+                }
+                if value.c_status != 0 {
+                    continue;
+                }
+                got_any = true;
+                if value.value > max {
+                    max = value.value;
+                }
+            }
+            if got_any && max > 0.0 {
+                Some(max)
+            } else {
+                None // counter set warming up (needs two collect rounds)
+            }
+        }
+    }
+
+    /// Highest live core clock in MHz (boost included), Task-Manager style.
+    pub fn max_core_mhz(core_count: usize) -> u64 {
+        let base = base_mhz(core_count);
+        if base == 0 {
+            return 0;
+        }
+        match max_performance_pct() {
+            Some(pct) => (base as f64 * pct / 100.0).round() as u64,
+            None => base, // PDH warm-up or unavailable: show base until ready
+        }
+    }
+}
+
+#[cfg(windows)]
+use live_freq::max_core_mhz;
+
+#[cfg(not(windows))]
+fn max_core_mhz(_core_count: usize) -> u64 {
+    0 // frequency display is Windows-only; the UI hides it at 0
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    /// Sanity: live clocks must read back in a plausible range, and the PDH
+    /// path must warm up to a real reading (14600KF: base 3500, boost 5300).
+    #[test]
+    fn freq_reads_live() {
+        // Warm the PDH query first.
+        let _ = super::max_core_mhz(20);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let idle = super::max_core_mhz(20);
+        // Saturate cores, then sample again — should reach boost clocks.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let stop = stop.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut x = 1.0f64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    x = (x * 1.000001).sqrt();
+                }
+                std::hint::black_box(x);
+            }));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let busy = super::max_core_mhz(20);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for h in handles {
+            let _ = h.join();
+        }
+        println!("freq idle={idle} busy={busy}");
+        assert!(busy > 400 && busy < 7000, "implausible: {busy}");
+    }
+}
+
 /// Synthetic waveform so the UI can be shown off without AutoCAD running.
 fn demo_payload(start: &Instant) -> StatsPayload {
     let t = start.elapsed().as_secs_f64();
@@ -121,7 +385,8 @@ fn demo_payload(start: &Instant) -> StatsPayload {
                 }
             })
             .collect(),
-        cpu_freq_mhz: (3300.0 + 240.0 * (t * 0.2).sin()).round().max(800.0) as u64,
+        // demo: frequency tracks load like real boost behavior (idle ~2.2G, full ~5.3G)
+        cpu_freq_mhz: (2200.0 + 3100.0 * (cpu / 100.0)).round() as u64,
         mem_mb: 1180.0 + 240.0 * (t / 45.0).sin() + 18.0 * (t * 0.9).sin(),
         gpu_pct: Some(gpu as f32),
         gpu_mem_mb: Some(2340.0 + 120.0 * (t / 30.0).sin()),
@@ -208,16 +473,14 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
 
             // ---- system-wide metrics --------------------------------------
             sys.refresh_memory();
-            sys.refresh_cpu_specifics(sysinfo::CpuRefreshKind::everything());
             sys.refresh_cpu_usage();
             let cores: Vec<f32> = sys.cpus().iter().map(|c| c.usage()).collect();
             let core_count = cores.len().max(1) as f32;
             let busiest_core = cores.iter().cloned().fold(0.0_f32, f32::max);
-            let cpu_freq_mhz = if cores.is_empty() {
-                0
-            } else {
-                sys.cpus().iter().map(|c| c.frequency()).sum::<u64>() / cores.len() as u64
-            };
+            // Live per-core frequency (boost included). sysinfo's frequency()
+            // is a static base clock from the registry on Windows, so a
+            // 14600KF would forever read 3.5 GHz instead of boosting to 5.3.
+            let cpu_freq_mhz = max_core_mhz(cores.len());
             let sys_cpu = sys.global_cpu_usage();
             let sys_avail_mb = sys.available_memory() as f64 / 1_048_576.0;
 

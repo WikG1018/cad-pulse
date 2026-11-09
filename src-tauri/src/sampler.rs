@@ -23,9 +23,13 @@ pub struct StatsPayload {
     pub busiest_core_pct: f32,
     /// Per-logical-core usage, one entry per core (0-100).
     pub cores: Vec<f32>,
-    /// Average current CPU frequency in MHz.
+    /// P/E classification for each logical processor, aligned with `cores`.
+    pub core_types: Vec<String>,
+    pub cpu_model: String,
+    /// Highest logical-core frequency in MHz (0 = unavailable).
     pub cpu_freq_mhz: u64,
     pub mem_mb: f64,
+    pub gpu_model: Option<String>,
     pub gpu_pct: Option<f32>,
     pub gpu_mem_mb: Option<f64>,
     pub gpu_temp_c: Option<u32>,
@@ -58,10 +62,11 @@ impl SamplerState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct GpuSample {
-    pct: f32,
-    mem_mb: f64,
+    model: String,
+    pct: Option<f32>,
+    mem_mb: Option<f64>,
     temp_c: Option<u32>,
     clock_mhz: Option<u32>,
 }
@@ -74,11 +79,17 @@ fn gpu_stats() -> Option<GpuSample> {
     let guard = cell.lock().ok()?;
     let nvml = guard.as_ref()?;
     let device = nvml.device_by_index(0).ok()?;
-    let util = device.utilization_rates().ok()?;
-    let mem = device.memory_info().ok()?;
     Some(GpuSample {
-        pct: util.gpu as f32,
-        mem_mb: mem.used as f64 / 1_048_576.0,
+        model: device
+            .name()
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "NVIDIA GPU".into()),
+        pct: device.utilization_rates().ok().map(|util| util.gpu as f32),
+        mem_mb: device
+            .memory_info()
+            .ok()
+            .map(|mem| mem.used as f64 / 1_048_576.0),
         temp_c: device
             .temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
             .ok(),
@@ -359,24 +370,208 @@ mod tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hybrid CPU topology (Windows)
+// EfficiencyClass is per physical core; its group affinity maps that class to
+// each logical processor. This avoids brittle core-index or model-name guesses.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+mod topology {
+    use std::collections::BTreeMap;
+    use std::sync::OnceLock;
+
+    const RELATION_PROCESSOR_CORE: u32 = 0;
+    static CORE_TYPES: OnceLock<Vec<String>> = OnceLock::new();
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetLogicalProcessorInformationEx(
+            relationship: u32,
+            buffer: *mut core::ffi::c_void,
+            returned_length: *mut u32,
+        ) -> i32;
+    }
+
+    pub fn core_types() -> &'static [String] {
+        CORE_TYPES.get_or_init(detect).as_slice()
+    }
+
+    fn u16_at(buffer: &[u8], offset: usize) -> Option<u16> {
+        Some(u16::from_ne_bytes(
+            buffer.get(offset..offset + 2)?.try_into().ok()?,
+        ))
+    }
+
+    fn u32_at(buffer: &[u8], offset: usize) -> Option<u32> {
+        Some(u32::from_ne_bytes(
+            buffer.get(offset..offset + 4)?.try_into().ok()?,
+        ))
+    }
+
+    fn u64_at(buffer: &[u8], offset: usize) -> Option<u64> {
+        Some(u64::from_ne_bytes(
+            buffer.get(offset..offset + 8)?.try_into().ok()?,
+        ))
+    }
+
+    fn classify(records: &[(u8, u16, u64)], group_masks: &BTreeMap<u16, u64>) -> Vec<String> {
+        let hybrid = records.iter().any(|(efficiency, _, _)| *efficiency > 0);
+        let mut types = Vec::new();
+        // Iterate set bits densely: a sparse affinity bit number is not a
+        // logical-core array index. Groups and bits follow Windows order.
+        for (group, mask) in group_masks {
+            for bit in 0..64 {
+                if mask & (1_u64 << bit) == 0 {
+                    continue;
+                }
+                let efficiency = records
+                    .iter()
+                    .find(|(_, record_group, record_mask)| {
+                        record_group == group && record_mask & (1_u64 << bit) != 0
+                    })
+                    .map(|(efficiency, _, _)| *efficiency)
+                    .unwrap_or(1);
+                types.push(if hybrid && efficiency == 0 {
+                    "E".into()
+                } else {
+                    "P".into()
+                });
+            }
+        }
+        types
+    }
+
+    fn detect() -> Vec<String> {
+        let mut length = 0_u32;
+        // First call obtains the required byte length; failure is expected.
+        unsafe {
+            GetLogicalProcessorInformationEx(
+                RELATION_PROCESSOR_CORE,
+                std::ptr::null_mut(),
+                &mut length,
+            );
+        }
+        if length == 0 {
+            return Vec::new();
+        }
+        let mut buffer = vec![0_u8; length as usize];
+        let ok = unsafe {
+            GetLogicalProcessorInformationEx(
+                RELATION_PROCESSOR_CORE,
+                buffer.as_mut_ptr().cast(),
+                &mut length,
+            )
+        };
+        if ok == 0 {
+            return Vec::new();
+        }
+
+        // x64 SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX: header 8 bytes,
+        // PROCESSOR_RELATIONSHIP: EfficiencyClass +1, GroupCount +22,
+        // GROUP_AFFINITY +24; affinity: Mask +0, Group +8, size 16.
+        let used = (length as usize).min(buffer.len());
+        let mut offset = 0_usize;
+        let mut records = Vec::new();
+        let mut group_masks = BTreeMap::<u16, u64>::new();
+        while offset + 48 <= used {
+            let Some(size) = u32_at(&buffer, offset + 4).map(|v| v as usize) else {
+                return Vec::new();
+            };
+            if size < 48 || offset + size > used {
+                return Vec::new();
+            }
+            let efficiency = buffer[offset + 9];
+            let group_count = u16_at(&buffer, offset + 30).unwrap_or(0);
+            for i in 0..group_count as usize {
+                let affinity = offset + 32 + i * 16;
+                if affinity + 16 > offset + size {
+                    return Vec::new();
+                }
+                let (Some(mask), Some(group)) =
+                    (u64_at(&buffer, affinity), u16_at(&buffer, affinity + 8))
+                else {
+                    return Vec::new();
+                };
+                records.push((efficiency, group, mask));
+                *group_masks.entry(group).or_default() |= mask;
+            }
+            offset += size;
+        }
+
+        classify(&records, &group_masks)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn classify_uses_dense_sparse_mask_order() {
+            let records = [(1, 0, 0b0101), (0, 0, 0b1010)];
+            let masks = std::collections::BTreeMap::from([(0, 0b1111)]);
+            assert_eq!(super::classify(&records, &masks), ["P", "E", "P", "E"]);
+        }
+
+        #[test]
+        fn classify_handles_groups_and_homogeneous_cpus() {
+            let records = [(1, 1, 0b1001), (0, 0, 0b0010)];
+            let masks = std::collections::BTreeMap::from([(0, 0b0010), (1, 0b1001)]);
+            assert_eq!(super::classify(&records, &masks), ["E", "P", "P"]);
+
+            let homogeneous = [(0, 0, 0b1010)];
+            let masks = std::collections::BTreeMap::from([(0, 0b1010)]);
+            assert_eq!(super::classify(&homogeneous, &masks), ["P", "P"]);
+        }
+
+        #[test]
+        fn topology_matches_sysinfo_logical_cpus() {
+            let mut sys = sysinfo::System::new().expect("sysinfo init");
+            sys.refresh_cpu_usage();
+            let types = super::core_types();
+            assert_eq!(types.len(), sys.cpus().len());
+            assert!(types.iter().all(|kind| kind == "P" || kind == "E"));
+            if types.iter().any(|kind| kind == "E") {
+                assert!(types.iter().any(|kind| kind == "P"));
+            }
+        }
+    }
+}
+
+#[cfg(not(all(windows, target_pointer_width = "64")))]
+mod topology {
+    pub fn core_types() -> &'static [String] {
+        &[]
+    }
+}
+
+fn processor_core_types() -> Vec<String> {
+    topology::core_types().to_vec()
+}
+
 /// Synthetic waveform so the UI can be shown off without AutoCAD running.
-fn demo_payload(start: &Instant) -> StatsPayload {
+fn demo_payload(start: &Instant, cpu_model: &str) -> StatsPayload {
     let t = start.elapsed().as_secs_f64();
     let wave = |phase: f64, amp: f64, base: f64, speed: f64| base + amp * (t * speed + phase).sin();
     let cpu = (wave(0.0, 34.0, 56.0, 0.10) + 4.0 * (t * 1.7).sin()).clamp(2.0, 100.0);
     let busiest = (cpu * 1.14 + 3.0).clamp(0.0, 100.0);
     let gpu = wave(2.1, 16.0, 14.0, 0.05).clamp(0.0, 100.0);
+    let core_types = processor_core_types();
+    let core_count = if core_types.is_empty() {
+        20
+    } else {
+        core_types.len()
+    };
+    let busiest_index = core_count / 3;
     StatsPayload {
         running: true,
         demo: true,
         pid: 4242,
         cpu_single_pct: cpu as f32,
-        cpu_total_pct: (cpu * 20.0 / 100.0) as f32,
+        cpu_total_pct: (cpu / core_count as f64) as f32,
         busiest_core_pct: busiest as f32,
-        // 20 logical cores; one of them carries the load, others idle-ish.
-        cores: (0..20)
+        // Demo load follows the machine's actual logical-core topology.
+        cores: (0..core_count)
             .map(|i| {
-                if i == 7 {
+                if i == busiest_index {
                     busiest as f32
                 } else if i % 5 == 0 {
                     (6.0 + 5.0 * ((t * 0.2) + i as f64).sin()).clamp(0.0, 100.0) as f32
@@ -385,9 +580,20 @@ fn demo_payload(start: &Instant) -> StatsPayload {
                 }
             })
             .collect(),
+        core_types: if core_types.is_empty() {
+            vec!["P".into(); core_count]
+        } else {
+            core_types
+        },
+        cpu_model: cpu_model.to_string(),
         // demo: frequency tracks load like real boost behavior (idle ~2.2G, full ~5.3G)
         cpu_freq_mhz: (2200.0 + 3100.0 * (cpu / 100.0)).round() as u64,
         mem_mb: 1180.0 + 240.0 * (t / 45.0).sin() + 18.0 * (t * 0.9).sin(),
+        gpu_model: Some(
+            gpu_stats()
+                .map(|g| g.model)
+                .unwrap_or_else(|| "NVIDIA GPU（演示）".into()),
+        ),
         gpu_pct: Some(gpu as f32),
         gpu_mem_mb: Some(2340.0 + 120.0 * (t / 30.0).sin()),
         gpu_temp_c: Some((38.0 + 12.0 * (t / 90.0).sin()).round() as u32),
@@ -414,6 +620,20 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
         );
         sys.refresh_cpu_usage();
         sys.refresh_memory();
+        let cpu_model = sys
+            .cpus()
+            .first()
+            .map(|cpu| cpu.brand().trim().to_string())
+            .filter(|brand| !brand.is_empty())
+            .unwrap_or_else(|| "未知 CPU".into());
+        let detected_core_types = processor_core_types();
+        // sysinfo may expose fewer logical CPUs on multi-group systems. Never
+        // align a complete Windows topology with a shorter sysinfo core list.
+        let core_types = if detected_core_types.len() == sys.cpus().len() {
+            detected_core_types
+        } else {
+            Vec::new()
+        };
 
         let mut cached_pid: Option<Pid> = None;
         let mut last_io: Option<(Instant, u64, u64)> = None;
@@ -429,7 +649,7 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
             if state.demo.load(Ordering::Relaxed) {
                 cached_pid = None;
                 last_io = None;
-                let payload = demo_payload(&demo_start);
+                let payload = demo_payload(&demo_start, &cpu_model);
                 let _ = app.emit("perf-tick", &payload);
                 tray::update(&app, &payload);
                 continue;
@@ -512,12 +732,15 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
                         cpu_total_pct: cpu_single / core_count,
                         busiest_core_pct: busiest_core,
                         cores: cores.clone(),
+                        core_types: core_types.clone(),
+                        cpu_model: cpu_model.clone(),
                         cpu_freq_mhz,
                         mem_mb: p.memory() as f64 / 1_048_576.0,
-                        gpu_pct: gpu.map(|g| g.pct),
-                        gpu_mem_mb: gpu.map(|g| g.mem_mb),
-                        gpu_temp_c: gpu.and_then(|g| g.temp_c),
-                        gpu_clock_mhz: gpu.and_then(|g| g.clock_mhz),
+                        gpu_model: gpu.as_ref().map(|g| g.model.clone()),
+                        gpu_pct: gpu.as_ref().and_then(|g| g.pct),
+                        gpu_mem_mb: gpu.as_ref().and_then(|g| g.mem_mb),
+                        gpu_temp_c: gpu.as_ref().and_then(|g| g.temp_c),
+                        gpu_clock_mhz: gpu.as_ref().and_then(|g| g.clock_mhz),
                         sys_cpu_pct: sys_cpu,
                         sys_mem_avail_mb: sys_avail_mb,
                         io_read_bps: rbps,
@@ -536,8 +759,11 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
                         cpu_total_pct: 0.0,
                         busiest_core_pct: busiest_core,
                         cores: cores.clone(),
+                        core_types: core_types.clone(),
+                        cpu_model: cpu_model.clone(),
                         cpu_freq_mhz,
                         mem_mb: 0.0,
+                        gpu_model: gpu.as_ref().map(|g| g.model.clone()),
                         gpu_pct: None,
                         gpu_mem_mb: None,
                         gpu_temp_c: None,

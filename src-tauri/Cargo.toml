@@ -1,6 +1,6 @@
 [package]
 name = "cad-pulse"
-version = "0.1.2"
+version = "0.2.0"
 description = "Always-on-top performance monitor for AutoCAD (single-core aware), with tray, HUD overlay and auto diagnosis"
 authors = ["WikG1018"]
 license = "MIT"

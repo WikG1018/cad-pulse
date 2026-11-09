@@ -1,3 +1,5 @@
+export type CoreType = "P" | "E";
+
 export interface Stats {
   running: boolean;
   demo: boolean;
@@ -6,8 +8,11 @@ export interface Stats {
   cpu_total_pct: number;
   busiest_core_pct: number;
   cores: number[];
+  core_types: CoreType[];
+  cpu_model: string;
   cpu_freq_mhz: number;
   mem_mb: number;
+  gpu_model: string | null;
   gpu_pct: number | null;
   gpu_mem_mb: number | null;
   gpu_temp_c: number | null;
@@ -20,19 +25,33 @@ export interface Stats {
   ts: number;
 }
 
-export function coreColor(pct: number): string {
-  if (pct >= 85) return "var(--danger)";
-  if (pct >= 50) return "var(--warn)";
-  if (pct >= 15) return "var(--brand)";
-  // idle bars: solid desaturated violet — low alpha just reads as "dark" on dark
-  return "hsl(258 45% 46%)";
+export function coreColor(pct: number, kind: CoreType = "P"): string {
+  if (pct >= 85) return "#f08b82";
+  if (pct >= 50) return "#efbd72";
+  return kind === "E" ? "#6fd3c7" : "#82a9ff";
+}
+
+export function gpuLoadColor(pct: number): string {
+  if (pct >= 85) return "#f08b82";
+  if (pct >= 50) return "#efbd72";
+  return "#6fd3c7";
+}
+
+export function memoryColor(availableMb: number): string {
+  if (availableMb < 2048) return "#f08b82";
+  if (availableMb < 4096) return "#efbd72";
+  return "#b7a5f8";
+}
+
+export function fmtFreq(mhz: number, digits = 2): string {
+  return mhz > 0 ? `${(mhz / 1000).toFixed(digits)} GHz` : "—";
 }
 
 /** GPU temperature scale: green below 60, amber to 75, red above. */
 export function tempColor(c: number): string {
-  if (c >= 75) return "var(--danger)";
-  if (c >= 60) return "var(--warn)";
-  return "var(--ok)";
+  if (c >= 75) return "#f08b82";
+  if (c >= 60) return "#efbd72";
+  return "#72c6a5";
 }
 
 export function fmtPct(v: number): string {

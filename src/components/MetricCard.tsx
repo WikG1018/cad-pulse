@@ -1,26 +1,19 @@
-import { type CSSProperties, type ReactNode, useCallback } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import Sparkline from "./Sparkline";
 import { useAnimatedNumber } from "../hooks/useAnimatedNumber";
 
 interface Props {
   label: string;
-  /** static preformatted value (used when no animation is wanted) */
   value: string;
-  /** numeric target for the rolling-digit animation */
   animValue?: number;
-  /** formats the animated number for display */
-  format?: (v: number) => string;
+  format?: (value: number) => string;
   unit?: string;
   color: string;
   data: number[];
   max?: number;
   sub?: ReactNode;
   secondary?: { data: number[]; max?: number };
-  big?: boolean;
-  /** let the sparkline stretch to fill remaining card height (HUD cards) */
-  autoSpark?: boolean;
-  /** stagger index for the entrance animation */
-  index?: number;
+  primary?: boolean;
   footer?: ReactNode;
 }
 
@@ -35,53 +28,25 @@ export default function MetricCard({
   max = 100,
   sub,
   secondary,
-  big = false,
-  autoSpark = false,
-  index = 0,
+  primary = false,
   footer,
 }: Props) {
   const animated = useAnimatedNumber(animValue ?? 0);
-  const shown =
-    animValue != null && format ? format(animated) : value;
+  const shown = animValue != null && format ? format(animated) : value;
 
-  // spotlight: track the pointer in CSS vars (Aceternity technique, CSS-only)
-  const onMove = useCallback((e: React.MouseEvent<HTMLElement>) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    e.currentTarget.style.setProperty("--mx", `${e.clientX - r.left}px`);
-    e.currentTarget.style.setProperty("--my", `${e.clientY - r.top}px`);
-  }, []);
-
-  const style = { "--card-index": index } as CSSProperties;
-
+  const style = { "--metric-color": color, borderColor: `${color}${primary ? "66" : "38"}` } as CSSProperties;
   return (
-    <div
-      className={`${big ? "dash-card" : "metric-card"}${autoSpark ? " metric-card-fill" : ""}`}
-      style={style}
-      onMouseMove={big ? onMove : undefined}
-    >
+    <section className={`metric-panel${primary ? " metric-primary" : ""}`} style={style} aria-label={`${label} ${shown}${unit ?? ""}`}>
       <div className="metric-head">
-        <span className="label" style={{ color }}>
-          {label}
-        </span>
+        <h3 className="metric-label">{label}</h3>
         {sub != null && <span className="metric-sub">{sub}</span>}
       </div>
-      <div>
-        <span className={`num metric-value`} style={{ color }}>
-          {shown}
-        </span>
+      <div className="metric-value-row">
+        <span className="num metric-value">{shown}</span>
         {unit && <span className="metric-unit num">{unit}</span>}
       </div>
-      <div className={big ? "spark" : autoSpark ? "spark-fill" : undefined}>
-        <Sparkline
-          data={data}
-          color={color}
-          height={autoSpark && !big ? "100%" : big ? 64 : 38}
-          max={max}
-          secondary={secondary?.data}
-          secondaryMax={secondary?.max}
-        />
-      </div>
-      {footer}
-    </div>
+      <Sparkline data={data} color={color} height={54} max={max} secondary={secondary?.data} secondaryMax={secondary?.max} />
+      {footer && <div className="metric-footer">{footer}</div>}
+    </section>
   );
 }

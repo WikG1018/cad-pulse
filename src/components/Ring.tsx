@@ -11,8 +11,8 @@ export default function Ring({
   pct,
   size = 22,
   width = 3,
-  color = "#8b5cf6",
-  track = "rgba(139,92,246,0.22)",
+  color = "#82a9ff",
+  track = "#303b4c",
 }: Props) {
   const r = (size - width) / 2;
   const c = 2 * Math.PI * r;

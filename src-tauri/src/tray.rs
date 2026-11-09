@@ -132,22 +132,31 @@ pub fn update(app: &AppHandle, p: &StatsPayload) {
 fn tooltip_text(p: &StatsPayload) -> String {
     if !p.running {
         return format!(
-            "CAD Pulse\n状态  等待 AutoCAD…\n系统  CPU {:.0}% · 可用内存 {:.0} GB",
+            "CAD Pulse\n状态  等待 AutoCAD…\n系统  CPU {:.0}% · 可用内存 {}",
             p.sys_cpu_pct,
-            p.sys_mem_avail_mb / 1024.0
+            format_mb(p.sys_mem_avail_mb)
         );
     }
-    let gpu = p
-        .gpu_pct
-        .map(|g| format!("{:.0}% ({:.1} GB)", g, p.gpu_mem_mb.unwrap_or(0.0) / 1024.0))
-        .unwrap_or_else(|| "不可用".into());
+    let gpu = match (p.gpu_pct, p.gpu_mem_mb) {
+        (Some(g), Some(m)) => format!("{:.0}% ({})", g, format_mb(m)),
+        (Some(g), None) => format!("{:.0}%", g),
+        _ => "不可用".into(),
+    };
     format!(
-        "CAD Pulse\nCPU   {:.0}%（单核口径，100% = 1 核满载）\n内存  {:.1} GB\nGPU   {}\n运行  {}",
+        "CAD Pulse\nCPU   {:.0}%（单核口径，100% = 1 核满载）\n内存  {}\nGPU   {}\n运行  {}",
         p.cpu_single_pct,
-        p.mem_mb / 1024.0,
+        format_mb(p.mem_mb),
         gpu,
         format_uptime(p.uptime_sec),
     )
+}
+
+fn format_mb(mb: f64) -> String {
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else {
+        format!("{:.0} MB", mb)
+    }
 }
 
 fn format_uptime(s: u64) -> String {
@@ -177,7 +186,7 @@ pub fn draw_icon(pct: f32, running: bool) -> tauri::image::Image<'static> {
         &mut pm,
         &track,
         if running {
-            (139, 92, 246, 70)
+            (130, 169, 255, 70)
         } else {
             (110, 110, 130, 60)
         },
@@ -189,7 +198,7 @@ pub fn draw_icon(pct: f32, running: bool) -> tauri::image::Image<'static> {
         let sweep = 360.0 * pct.clamp(0.0, 100.0) / 100.0;
         let arc = arc_path(cx, cy, r, -90.0, sweep);
         let color = if pct < 50.0 {
-            (139, 92, 246, 255) // brand violet
+            (130, 169, 255, 255) // data blue
         } else if pct < 85.0 {
             (251, 191, 36, 255) // amber
         } else {

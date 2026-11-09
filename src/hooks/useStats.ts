@@ -20,8 +20,9 @@ export function useStats() {
         return next.length > MAX_POINTS ? next.slice(next.length - MAX_POINTS) : next;
       });
     }).then((u) => {
-      un = u;
-    });
+      if (alive) un = u;
+      else u();
+    }).catch(() => {});
     return () => {
       alive = false;
       un?.();
@@ -31,10 +32,12 @@ export function useStats() {
   return { latest, history };
 }
 
-/** Extract the last `n` points of a field as a plain number series. */
-export function series(history: Stats[], f: (s: Stats) => number | null, n: number): number[] {
+/** Extract a field within the trailing time window (seconds), independent of sample rate. */
+export function series(history: Stats[], f: (s: Stats) => number | null, seconds: number): number[] {
+  const lastTs = history[history.length - 1]?.ts;
+  if (lastTs == null) return [];
   return history
-    .slice(-n)
+    .filter((s) => s.ts >= lastTs - seconds)
     .map(f)
     .filter((v): v is number => v != null);
 }

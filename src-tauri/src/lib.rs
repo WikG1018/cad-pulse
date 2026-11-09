@@ -11,8 +11,8 @@ use tauri::{AppHandle, Manager, WindowEvent};
 static GLASS_HUD: AtomicBool = AtomicBool::new(false);
 static GLASS_DASH: AtomicBool = AtomicBool::new(false);
 
-/// Deep violet acrylic tint (r, g, b, a).
-const GLASS_TINT: (u8, u8, u8, u8) = (22, 15, 46, 170);
+/// Neutral graphite acrylic tint (r, g, b, a).
+const GLASS_TINT: (u8, u8, u8, u8) = (15, 20, 30, 210);
 
 fn try_apply_glass(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("hud") {

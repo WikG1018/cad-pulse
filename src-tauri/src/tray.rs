@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Wry};
+use tauri::{AppHandle, Manager, Wry};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::sampler::{SamplerState, StatsPayload};
@@ -17,12 +17,18 @@ const ID_DEMO: &str = "demo";
 const ID_AUTOSTART: &str = "autostart";
 const ID_QUIT: &str = "quit";
 
-/// Handle to the demo check-item so commands can keep its tick in sync.
+/// Native menu handles kept in sync with frontend commands and language.
 pub struct TrayHandles {
     pub demo_item: Mutex<Option<CheckMenuItem<Wry>>>,
+    pub toggle_hud_item: Mutex<Option<MenuItem<Wry>>>,
+    pub open_dashboard_item: Mutex<Option<MenuItem<Wry>>>,
+    pub autostart_item: Mutex<Option<CheckMenuItem<Wry>>>,
+    pub quit_item: Mutex<Option<MenuItem<Wry>>>,
 }
 
 static TICK_COUNT: AtomicU32 = AtomicU32::new(0);
+static ENGLISH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAST_PAYLOAD: Mutex<Option<StatsPayload>> = Mutex::new(None);
 
 pub fn init(
     app: &AppHandle,
@@ -56,6 +62,10 @@ pub fn init(
     )?;
 
     *handles.demo_item.lock().unwrap() = Some(demo.clone());
+    *handles.toggle_hud_item.lock().unwrap() = Some(toggle_hud.clone());
+    *handles.open_dashboard_item.lock().unwrap() = Some(open_dash.clone());
+    *handles.autostart_item.lock().unwrap() = Some(autostart.clone());
+    *handles.quit_item.lock().unwrap() = Some(quit.clone());
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(draw_icon(0.0, false))
@@ -76,6 +86,53 @@ pub fn init(
             }
         })
         .build(app)?;
+    Ok(())
+}
+
+pub fn set_language(app: &AppHandle, handles: &TrayHandles, english: bool) -> tauri::Result<()> {
+    ENGLISH.store(english, Ordering::Relaxed);
+    let (toggle, dashboard, demo, autostart, quit, title) = if english {
+        (
+            "Show/Hide HUD",
+            "Open dashboard",
+            "Demo mode",
+            "Run at startup",
+            "Quit",
+            "CAD Pulse · Dashboard",
+        )
+    } else {
+        (
+            "显示/隐藏悬浮窗",
+            "打开详情面板",
+            "演示模式",
+            "开机自启",
+            "退出",
+            "CAD Pulse · 详情面板",
+        )
+    };
+    if let Some(item) = handles.toggle_hud_item.lock().unwrap().as_ref() {
+        item.set_text(toggle)?;
+    }
+    if let Some(item) = handles.open_dashboard_item.lock().unwrap().as_ref() {
+        item.set_text(dashboard)?;
+    }
+    if let Some(item) = handles.demo_item.lock().unwrap().as_ref() {
+        item.set_text(demo)?;
+    }
+    if let Some(item) = handles.autostart_item.lock().unwrap().as_ref() {
+        item.set_text(autostart)?;
+    }
+    if let Some(item) = handles.quit_item.lock().unwrap().as_ref() {
+        item.set_text(quit)?;
+    }
+    if let Some(window) = app.get_webview_window("dashboard") {
+        window.set_title(title)?;
+    }
+    if let Some(tray) = app.tray_by_id(TRAY_ID)
+        && let Some(payload) = LAST_PAYLOAD.lock().unwrap().as_ref()
+    {
+        tray.set_tooltip(Some(tooltip_text(payload)))?;
+    }
     Ok(())
 }
 
@@ -114,6 +171,7 @@ fn handle_menu_event(
 /// Called every sampler tick: redraw the ring icon, refresh the tooltip
 /// every other tick so hover text does not flicker.
 pub fn update(app: &AppHandle, p: &StatsPayload) {
+    *LAST_PAYLOAD.lock().unwrap() = Some(p.clone());
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
@@ -130,25 +188,50 @@ pub fn update(app: &AppHandle, p: &StatsPayload) {
 }
 
 fn tooltip_text(p: &StatsPayload) -> String {
+    let english = ENGLISH.load(Ordering::Relaxed);
     if !p.running {
-        return format!(
-            "CAD Pulse\n状态  等待 AutoCAD…\n系统  CPU {:.0}% · 可用内存 {}",
-            p.sys_cpu_pct,
-            format_mb(p.sys_mem_avail_mb)
-        );
+        return if english {
+            format!(
+                "CAD Pulse\nStatus  Waiting for AutoCAD…\nSystem  CPU {:.0}% · Available {}",
+                p.sys_cpu_pct,
+                format_mb(p.sys_mem_avail_mb)
+            )
+        } else {
+            format!(
+                "CAD Pulse\n状态  等待 AutoCAD…\n系统  CPU {:.0}% · 可用内存 {}",
+                p.sys_cpu_pct,
+                format_mb(p.sys_mem_avail_mb)
+            )
+        };
     }
     let gpu = match (p.gpu_pct, p.gpu_mem_mb) {
         (Some(g), Some(m)) => format!("{:.0}% ({})", g, format_mb(m)),
         (Some(g), None) => format!("{:.0}%", g),
-        _ => "不可用".into(),
+        _ => if english { "unavailable" } else { "不可用" }.into(),
     };
-    format!(
-        "CAD Pulse\nCPU   {:.0}%（单核口径，100% = 1 核满载）\n内存  {}\nGPU   {}\n运行  {}",
-        p.cpu_single_pct,
-        format_mb(p.mem_mb),
-        gpu,
-        format_uptime(p.uptime_sec),
-    )
+    let thread = p
+        .busiest_thread_pct
+        .map(|pct| format!("{pct:.0}%"))
+        .unwrap_or_else(|| if english { "unavailable" } else { "不可用" }.into());
+    if english {
+        format!(
+            "CAD Pulse\nCPU   {:.0}% (core-equivalent; 100% = one core)\nThread  {} (busiest AutoCAD thread)\nMemory  {}\nGPU   {}\nUptime  {}",
+            p.cpu_single_pct,
+            thread,
+            format_mb(p.mem_mb),
+            gpu,
+            format_uptime(p.uptime_sec),
+        )
+    } else {
+        format!(
+            "CAD Pulse\nCPU   {:.0}%（进程核当量，100% = 1 核工作量）\n线程  {}（AutoCAD 最忙线程）\n内存  {}\nGPU   {}\n运行  {}",
+            p.cpu_single_pct,
+            thread,
+            format_mb(p.mem_mb),
+            gpu,
+            format_uptime(p.uptime_sec),
+        )
+    }
 }
 
 fn format_mb(mb: f64) -> String {

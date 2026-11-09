@@ -4,7 +4,7 @@ mod tray;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::{AppHandle, Manager, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
 /// Per-window glass status: acrylic may succeed on one window and fail on
 /// another depending on session type, so each window reports its own.
@@ -63,6 +63,10 @@ pub fn run() {
     let state = sampler::SamplerState::new();
     let handles = Arc::new(tray::TrayHandles {
         demo_item: std::sync::Mutex::new(None),
+        toggle_hud_item: std::sync::Mutex::new(None),
+        open_dashboard_item: std::sync::Mutex::new(None),
+        autostart_item: std::sync::Mutex::new(None),
+        quit_item: std::sync::Mutex::new(None),
     });
 
     tauri::Builder::default()
@@ -90,6 +94,7 @@ pub fn run() {
             set_demo,
             open_dashboard,
             toggle_hud_window,
+            set_language,
             glass_enabled
         ])
         .setup(move |app| {
@@ -156,6 +161,22 @@ fn set_demo(
     if let Some(item) = handles.demo_item.lock().unwrap().as_ref() {
         let _ = item.set_checked(on);
     }
+}
+
+#[tauri::command]
+fn set_language(
+    language: String,
+    app: AppHandle,
+    handles: tauri::State<'_, Arc<tray::TrayHandles>>,
+) -> Result<(), String> {
+    let english = match language.as_str() {
+        "zh-CN" => false,
+        "en-US" => true,
+        _ => return Err("unsupported language".into()),
+    };
+    tray::set_language(&app, &handles, english).map_err(|error| error.to_string())?;
+    app.emit("language-changed", language)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

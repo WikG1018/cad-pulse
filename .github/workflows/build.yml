@@ -43,6 +43,10 @@ jobs:
           cargo fmt --check
           cargo clippy -- -D warnings
 
+      - name: Test Rust
+        working-directory: src-tauri
+        run: cargo test
+
       - name: Build app (debug)
         working-directory: src-tauri
         run: cargo check

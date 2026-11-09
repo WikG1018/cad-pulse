@@ -7,6 +7,9 @@ export interface Stats {
   cpu_single_pct: number;
   cpu_total_pct: number;
   busiest_core_pct: number;
+  busiest_thread_pct: number | null;
+  busiest_thread_id: number | null;
+  thread_count: number;
   cores: number[];
   core_types: CoreType[];
   cpu_model: string;

@@ -10,9 +10,9 @@ use crate::tray;
 
 /// One sample pushed to the frontend every tick (1 Hz by default).
 ///
-/// `cpu_single_pct` uses the per-core convention: 100.0 = one core fully used,
-/// which is the number that matters for AutoCAD's mostly single-threaded 2D
-/// pipeline. `cpu_total_pct` is the task-manager style normalized figure.
+/// `cpu_single_pct` is process-wide core-equivalent CPU: all acad.exe threads
+/// summed, where 100.0 equals one logical core's work. It is not the load of a
+/// single core or thread. `cpu_total_pct` is normalized by logical-core count.
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct StatsPayload {
     pub running: bool,
@@ -21,6 +21,11 @@ pub struct StatsPayload {
     pub cpu_single_pct: f32,
     pub cpu_total_pct: f32,
     pub busiest_core_pct: f32,
+    /// Busiest acad.exe thread, measured from its own kernel/user time deltas.
+    /// None means warming up or unavailable; 100% is one logical core's work.
+    pub busiest_thread_pct: Option<f32>,
+    pub busiest_thread_id: Option<u32>,
+    pub thread_count: u32,
     /// Per-logical-core usage, one entry per core (0-100).
     pub cores: Vec<f32>,
     /// P/E classification for each logical processor, aligned with `cores`.
@@ -371,6 +376,213 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
+// AutoCAD per-thread CPU (Windows)
+//
+// Thread times are cumulative 100 ns units. Sampling their delta gives a true
+// per-thread core-equivalent value regardless of which logical core ran it.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ThreadSample {
+    pub busiest_pct: Option<f32>,
+    pub busiest_id: Option<u32>,
+    pub count: u32,
+}
+
+#[cfg(windows)]
+mod thread_cpu {
+    use super::ThreadSample;
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    type Handle = *mut core::ffi::c_void;
+    const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
+    const THREAD_QUERY_LIMITED_INFORMATION: u32 = 0x0800;
+    const INVALID_HANDLE_VALUE: Handle = -1_isize as Handle;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct ThreadEntry32 {
+        size: u32,
+        usage: u32,
+        thread_id: u32,
+        owner_process_id: u32,
+        base_priority: i32,
+        delta_priority: i32,
+        flags: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
+        fn Thread32First(snapshot: Handle, entry: *mut ThreadEntry32) -> i32;
+        fn Thread32Next(snapshot: Handle, entry: *mut ThreadEntry32) -> i32;
+        fn OpenThread(access: u32, inherit_handle: i32, thread_id: u32) -> Handle;
+        fn GetThreadTimes(
+            thread: Handle,
+            creation: *mut u64,
+            exit: *mut u64,
+            kernel: *mut u64,
+            user: *mut u64,
+        ) -> i32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+
+    #[derive(Clone, Copy)]
+    struct ThreadTime {
+        creation: u64,
+        total: u64,
+        at: Instant,
+    }
+
+    #[derive(Default)]
+    pub struct ThreadCpuSampler {
+        pid: Option<u32>,
+        previous: HashMap<u32, ThreadTime>,
+    }
+
+    impl ThreadCpuSampler {
+        pub fn reset(&mut self) {
+            self.pid = None;
+            self.previous.clear();
+        }
+
+        pub fn sample(&mut self, pid: u32) -> ThreadSample {
+            if self.pid != Some(pid) {
+                self.previous.clear();
+                self.pid = Some(pid);
+            }
+            let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+            if snapshot == INVALID_HANDLE_VALUE {
+                return ThreadSample::default();
+            }
+
+            let now = Instant::now();
+            let mut current = HashMap::new();
+            let mut result = ThreadSample::default();
+            let mut entry = ThreadEntry32 {
+                size: std::mem::size_of::<ThreadEntry32>() as u32,
+                usage: 0,
+                thread_id: 0,
+                owner_process_id: 0,
+                base_priority: 0,
+                delta_priority: 0,
+                flags: 0,
+            };
+            let mut ok = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+            while ok {
+                if entry.owner_process_id == pid {
+                    result.count += 1;
+                    if let Some(times) = read_thread_times(entry.thread_id) {
+                        if let Some(previous) = self.previous.get(&entry.thread_id)
+                            && previous.creation == times.0
+                            && times.1 >= previous.total
+                        {
+                            let elapsed = now.duration_since(previous.at).as_secs_f64();
+                            if elapsed > 0.0 {
+                                let pct = usage_pct(times.1 - previous.total, elapsed);
+                                if result.busiest_pct.is_none_or(|best| pct > best) {
+                                    result.busiest_pct = Some(pct);
+                                    result.busiest_id = Some(entry.thread_id);
+                                }
+                            }
+                        }
+                        current.insert(
+                            entry.thread_id,
+                            ThreadTime {
+                                creation: times.0,
+                                total: times.1,
+                                at: now,
+                            },
+                        );
+                    }
+                }
+                ok = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+            }
+            unsafe { CloseHandle(snapshot) };
+            self.previous = current;
+            result
+        }
+    }
+
+    /// Returns (creation time, kernel + user time), all in 100 ns units.
+    fn read_thread_times(thread_id: u32) -> Option<(u64, u64)> {
+        let handle = unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, thread_id) };
+        if handle.is_null() {
+            return None;
+        }
+        let (mut creation, mut exit, mut kernel, mut user) = (0_u64, 0_u64, 0_u64, 0_u64);
+        let ok =
+            unsafe { GetThreadTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) }
+                != 0;
+        unsafe { CloseHandle(handle) };
+        ok.then_some((creation, kernel.saturating_add(user)))
+    }
+
+    fn usage_pct(delta_100ns: u64, elapsed_secs: f64) -> f32 {
+        if elapsed_secs <= 0.0 {
+            return 0.0;
+        }
+        (delta_100ns as f64 / 100_000.0 / elapsed_secs).clamp(0.0, 100.0) as f32
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn thread_time_delta_uses_core_equivalent_scale() {
+            assert_eq!(super::usage_pct(5_000_000, 0.5), 100.0);
+            assert_eq!(super::usage_pct(2_500_000, 0.5), 50.0);
+            assert_eq!(super::usage_pct(5_000_000, 0.0), 0.0);
+        }
+
+        #[test]
+        fn samples_a_live_busy_thread() {
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn GetCurrentProcessId() -> u32;
+            }
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let worker_stop = stop.clone();
+            let worker = std::thread::spawn(move || {
+                let mut x = 1.0_f64;
+                while !worker_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    x = (x * 1.000001).sqrt();
+                }
+                std::hint::black_box(x);
+            });
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let mut sampler = super::ThreadCpuSampler::default();
+            let pid = unsafe { GetCurrentProcessId() };
+            let baseline = sampler.sample(pid);
+            assert!(baseline.count >= 2);
+            assert!(baseline.busiest_pct.is_none());
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let measured = sampler.sample(pid);
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            worker.join().expect("worker thread");
+            assert!(measured.count >= 2);
+            let busiest = measured.busiest_pct.expect("second sample has deltas");
+            assert!(busiest > 5.0, "busy thread was not measured: {busiest}");
+        }
+    }
+}
+
+#[cfg(windows)]
+use thread_cpu::ThreadCpuSampler;
+
+#[cfg(not(windows))]
+#[derive(Default)]
+pub struct ThreadCpuSampler;
+
+#[cfg(not(windows))]
+impl ThreadCpuSampler {
+    pub fn reset(&mut self) {}
+    pub fn sample(&mut self, _pid: u32) -> ThreadSample {
+        ThreadSample::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Hybrid CPU topology (Windows)
 // EfficiencyClass is per physical core; its group affinity maps that class to
 // each logical processor. This avoids brittle core-index or model-name guesses.
@@ -568,6 +780,9 @@ fn demo_payload(start: &Instant, cpu_model: &str) -> StatsPayload {
         cpu_single_pct: cpu as f32,
         cpu_total_pct: (cpu / core_count as f64) as f32,
         busiest_core_pct: busiest as f32,
+        busiest_thread_pct: Some((cpu * 0.92 + 5.0).clamp(0.0, 100.0) as f32),
+        busiest_thread_id: Some(4243),
+        thread_count: 24,
         // Demo load follows the machine's actual logical-core topology.
         cores: (0..core_count)
             .map(|i| {
@@ -592,7 +807,7 @@ fn demo_payload(start: &Instant, cpu_model: &str) -> StatsPayload {
         gpu_model: Some(
             gpu_stats()
                 .map(|g| g.model)
-                .unwrap_or_else(|| "NVIDIA GPU（演示）".into()),
+                .unwrap_or_else(|| "NVIDIA GPU".into()),
         ),
         gpu_pct: Some(gpu as f32),
         gpu_mem_mb: Some(2340.0 + 120.0 * (t / 30.0).sin()),
@@ -625,7 +840,7 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
             .first()
             .map(|cpu| cpu.brand().trim().to_string())
             .filter(|brand| !brand.is_empty())
-            .unwrap_or_else(|| "未知 CPU".into());
+            .unwrap_or_default();
         let detected_core_types = processor_core_types();
         // sysinfo may expose fewer logical CPUs on multi-group systems. Never
         // align a complete Windows topology with a shorter sysinfo core list.
@@ -637,6 +852,7 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
 
         let mut cached_pid: Option<Pid> = None;
         let mut last_io: Option<(Instant, u64, u64)> = None;
+        let mut thread_cpu = ThreadCpuSampler::default();
         let demo_start = Instant::now();
 
         loop {
@@ -649,6 +865,7 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
             if state.demo.load(Ordering::Relaxed) {
                 cached_pid = None;
                 last_io = None;
+                thread_cpu.reset();
                 let payload = demo_payload(&demo_start, &cpu_model);
                 let _ = app.emit("perf-tick", &payload);
                 tray::update(&app, &payload);
@@ -724,6 +941,7 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
                         _ => (0.0, 0.0),
                     };
                     last_io = Some((now, du.total_read_bytes, du.total_written_bytes));
+                    let thread = thread_cpu.sample(pid.as_u32());
                     StatsPayload {
                         running: true,
                         demo: false,
@@ -731,6 +949,9 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
                         cpu_single_pct: cpu_single,
                         cpu_total_pct: cpu_single / core_count,
                         busiest_core_pct: busiest_core,
+                        busiest_thread_pct: thread.busiest_pct,
+                        busiest_thread_id: thread.busiest_id,
+                        thread_count: thread.count,
                         cores: cores.clone(),
                         core_types: core_types.clone(),
                         cpu_model: cpu_model.clone(),
@@ -751,6 +972,7 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
                 }
                 None => {
                     last_io = None;
+                    thread_cpu.reset();
                     StatsPayload {
                         running: false,
                         demo: false,
@@ -758,6 +980,9 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
                         cpu_single_pct: 0.0,
                         cpu_total_pct: 0.0,
                         busiest_core_pct: busiest_core,
+                        busiest_thread_pct: None,
+                        busiest_thread_id: None,
+                        thread_count: 0,
                         cores: cores.clone(),
                         core_types: core_types.clone(),
                         cpu_model: cpu_model.clone(),

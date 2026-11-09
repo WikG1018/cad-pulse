@@ -1,4 +1,4 @@
-/* CAD Pulse v3 — graphite glass, one data accent, Chinese-first typography. */
+/* CAD Pulse — graphite glass with semantic data colors and bilingual UI. */
 :root {
   --bg: #10151f;
   --surface: #171e2a;
@@ -86,7 +86,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
 .glass .metric-panel, .glass .panel { background: rgba(23, 30, 42, 0.94); }
 .glass .metric-primary { background: rgba(25, 35, 51, 0.95); }
 
-/* HUD — one protagonist: AutoCAD single-core CPU. */
+/* HUD — AutoCAD process CPU in core-equivalent units. */
 .hud-root { width: 100vw; height: 100vh; display: flex; flex-direction: column; overflow: hidden; border: 1px solid #344156; border-radius: var(--radius-window); background: var(--bg); box-shadow: 0 14px 36px rgba(0, 0, 0, 0.30); }
 .hud-titlebar { height: 38px; display: flex; align-items: center; gap: 7px; flex: none; padding: 0 7px 0 12px; border-bottom: 1px solid var(--line-soft); }
 .hud-titlebar .brand-symbol { width: 20px; height: 20px; }
@@ -119,11 +119,18 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
 .hud-waiting strong { font-size: 14px; font-weight: 600; }
 .hud-waiting p { color: var(--text-muted); font-size: 11px; }
 .hud-demo { min-height: 25px; margin-top: 4px; font-size: 11px; }
-.hud-mini { width: 100vw; height: 100vh; display: flex; align-items: center; gap: 9px; padding: 0 7px 0 10px; border: 1px solid #344156; border-radius: 8px; background: var(--bg); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28); }
-.mini-reading { display: flex; align-items: baseline; gap: 6px; flex: 1; white-space: nowrap; }
-.mini-reading .num { color: var(--text); font-size: 16px; font-weight: 600; }
-.mini-reading > span:last-child { color: var(--text-muted); font-size: 11px; }
+.hud-mini { width: 100vw; height: 100vh; display: flex; align-items: center; gap: 7px; padding: 0 7px; border: 1px solid #344156; border-radius: 8px; background: var(--bg); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28); }
+.mini-cpu { min-width: 0; display: flex; align-items: center; gap: 6px; flex: none; }
+.mini-reading { min-width: 0; display: flex; align-items: baseline; gap: 4px; flex: none; white-space: nowrap; }
+.mini-reading .num { min-width: 0; overflow: hidden; color: var(--text); font-size: 16px; font-weight: 600; text-overflow: ellipsis; }
+.mini-reading > span:last-child { flex: none; color: var(--text-muted); font-size: 10px; }
+.mini-stat { min-width: 0; flex: 1; overflow: hidden; padding-left: 6px; border-left: 1px solid var(--line-soft); white-space: nowrap; }
+.mini-stat-label { display: block; overflow: hidden; color: var(--text-muted); font-size: 9px; line-height: 12px; text-overflow: ellipsis; }
+.mini-stat > div { min-width: 0; display: flex; align-items: baseline; gap: 3px; overflow: hidden; }
+.mini-stat-value { min-width: 0; overflow: hidden; color: var(--text); font-size: 13px; font-weight: 600; line-height: 17px; text-overflow: ellipsis; }
+.mini-stat-unit { flex: none; color: var(--text-muted); font-size: 9px; }
 .hud-mini > .status-dot { margin-left: auto; }
+.hud-mini > .icon-btn { width: 25px; height: 25px; flex: none; }
 
 /* Dashboard shell and title bar */
 .dash-root { width: 100vw; height: 100vh; display: flex; flex-direction: column; overflow: hidden; border: 1px solid #344156; border-radius: var(--radius-window); background: var(--bg); }
@@ -193,7 +200,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
 .section-heading h2 { color: var(--text); font-size: 14px; font-weight: 600; }
 .section-heading p { margin-top: 1px; color: var(--text-muted); font-size: 11px; }
 .section-note, .section-kicker { color: var(--text-muted); font-size: 11px; }
-.cores-content { display: grid; grid-template-columns: minmax(0, 1fr) 224px; align-items: end; gap: 20px; margin-top: 12px; }
+.cores-content { display: grid; grid-template-columns: minmax(0, 1fr) 270px; align-items: end; gap: 20px; margin-top: 12px; }
 .core-groups { width: 100%; display: flex; align-items: flex-end; gap: 16px; }
 .core-group { min-width: 0; }
 .core-group-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; color: var(--text-muted); font-size: 11px; }
@@ -208,7 +215,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
 .core-empty { display: flex; align-items: center; color: var(--text-muted); font-size: 12px; }
 .cores-side { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding-bottom: 17px; }
 .side-stat { min-width: 0; padding-left: 10px; border-left: 1px solid var(--line); }
-.side-stat > span { display: block; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.side-stat > span { display: block; overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .side-stat strong { display: block; margin-top: 4px; color: var(--text); font-size: 17px; font-weight: 600; white-space: nowrap; }
 .side-stat strong.accent { color: var(--accent); }
 
@@ -246,7 +253,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
   .section-note { display: none; }
   .metric-grid { grid-template-columns: minmax(0, 1.45fr) repeat(2, minmax(0, 1fr)); }
   .chart-legend { display: none; }
-  .cores-content { grid-template-columns: minmax(0, 1fr) 210px; gap: 14px; }
+  .cores-content { grid-template-columns: minmax(0, 1fr) 250px; gap: 14px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }

@@ -29,3 +29,8 @@ src-tauri/.mimosa/
 
 # rust build artifacts beyond template defaults
 src-tauri/target/
+
+# local handover, workspace memory and validation captures
+HANDOVER.md
+.workbuddy/
+shots/

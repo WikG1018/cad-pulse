@@ -26,6 +26,15 @@ pub struct StatsPayload {
     pub busiest_thread_pct: Option<f32>,
     pub busiest_thread_id: Option<u32>,
     pub thread_count: u32,
+    /// AutoCAD UI-thread responsiveness, measured by a WM_NULL round trip.
+    /// `None` means the probe could not run (no window, access denied, or a
+    /// non-Windows build) and is not evidence either way. `Some(false)` means
+    /// the message pump missed the deadline: the only direct sign of a stall.
+    pub ui_responsive: Option<bool>,
+    /// Round-trip latency of a successful probe, or the timeout that was missed.
+    pub ui_response_ms: Option<u32>,
+    /// Seconds since the UI thread first missed a probe; 0 while responsive.
+    pub ui_stall_sec: u64,
     /// Per-logical-core usage, one entry per core (0-100).
     pub cores: Vec<f32>,
     /// P/E classification for each logical processor, aligned with `cores`.
@@ -583,6 +592,321 @@ impl ThreadCpuSampler {
 }
 
 // ---------------------------------------------------------------------------
+// AutoCAD UI responsiveness (Windows)
+//
+// CPU load cannot separate "compute-bound" from "blocked": a process can sit at
+// 3% while its UI thread waits on a lock, an unreachable network path or a
+// modal dialog. A WM_NULL round trip answers that directly — it returns only
+// when the target thread pumps its message queue. The probe is read-only:
+// nothing that could change AutoCAD state is sent, and the timeout bounds our
+// own blocking to one short call per tick.
+// ---------------------------------------------------------------------------
+
+const UI_PROBE_TIMEOUT_MS: u32 = 200;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiReply {
+    /// The message pump answered; value is the round-trip latency in ms.
+    Replied(u32),
+    /// No answer within the budget: the UI thread is not pumping messages.
+    Stalled(u32),
+    /// No window to probe, or the OS refused it. Says nothing about load.
+    Unavailable,
+}
+
+/// Accumulates how long the UI thread has been unreachable across ticks.
+///
+/// Kept apart from the probe so the rule is testable without real windows or
+/// real sleeps: a single missed probe is jitter, a run of them is a freeze.
+#[derive(Default, Debug)]
+pub struct StallTracker {
+    started: Option<Instant>,
+}
+
+impl StallTracker {
+    /// Whole seconds since the first miss in the current run; 0 once a reply lands.
+    pub fn record(&mut self, replied: bool, now: Instant) -> u64 {
+        if replied {
+            self.started = None;
+            return 0;
+        }
+        let started = *self.started.get_or_insert(now);
+        now.saturating_duration_since(started).as_secs()
+    }
+
+    pub fn reset(&mut self) {
+        self.started = None;
+    }
+}
+
+#[cfg(windows)]
+mod window_probe {
+    use std::time::Instant;
+
+    use super::UiReply;
+
+    const WM_NULL: u32 = 0x0000;
+    const GW_OWNER: u32 = 4;
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_INVALID_WINDOW_HANDLE: i32 = 1400;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumWindows(
+            callback: Option<unsafe extern "system" fn(isize, isize) -> i32>,
+            lparam: isize,
+        ) -> i32;
+        fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+        fn IsWindowVisible(hwnd: isize) -> i32;
+        fn IsWindow(hwnd: isize) -> i32;
+        fn GetWindow(hwnd: isize, cmd: u32) -> isize;
+        fn GetWindowTextLengthW(hwnd: isize) -> i32;
+        fn SendMessageTimeoutW(
+            hwnd: isize,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+            flags: u32,
+            timeout: u32,
+            result: *mut usize,
+        ) -> isize;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetLastError(code: u32);
+    }
+
+    struct Search {
+        pid: u32,
+        best: Option<(isize, i32)>,
+    }
+
+    unsafe extern "system" fn visit(hwnd: isize, lparam: isize) -> i32 {
+        let search = unsafe { &mut *(lparam as *mut Search) };
+        let mut owner_pid = 0_u32;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut owner_pid) };
+        if owner_pid != search.pid {
+            return 1;
+        }
+        // Only the frame is a useful target: visible, unowned and titled.
+        // Floating palettes share the same UI thread, so the longest title is
+        // a safe tie-break rather than a fragile window-class guess.
+        if unsafe { IsWindowVisible(hwnd) } == 0 || unsafe { GetWindow(hwnd, GW_OWNER) } != 0 {
+            return 1;
+        }
+        let title = unsafe { GetWindowTextLengthW(hwnd) };
+        if title <= 0 {
+            return 1;
+        }
+        if search.best.is_none_or(|(_, best)| title > best) {
+            search.best = Some((hwnd, title));
+        }
+        1
+    }
+
+    fn find(pid: u32) -> Option<isize> {
+        let mut search = Search { pid, best: None };
+        let ok = unsafe { EnumWindows(Some(visit), &mut search as *mut Search as isize) };
+        if ok == 0 {
+            return None;
+        }
+        search.best.map(|(hwnd, _)| hwnd)
+    }
+
+    /// Handle cache keyed by PID.
+    ///
+    /// Enumeration is not just wasted work every tick: Windows stops reporting
+    /// a window from a thread that has stopped pumping, so re-enumerating during
+    /// a freeze would turn the very state we want to report into "unavailable".
+    static CACHE: std::sync::Mutex<Option<(u32, isize)>> = std::sync::Mutex::new(None);
+
+    fn handle(pid: u32) -> Option<isize> {
+        let mut cache = CACHE.lock().ok()?;
+        match *cache {
+            Some((cached_pid, hwnd)) if cached_pid == pid && unsafe { IsWindow(hwnd) } != 0 => {
+                return Some(hwnd);
+            }
+            _ => {}
+        }
+        let hwnd = find(pid)?;
+        *cache = Some((pid, hwnd));
+        Some(hwnd)
+    }
+
+    fn invalidate() {
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = None;
+        }
+    }
+
+    /// One read-only round trip against PID's main window.
+    ///
+    /// No SMTO_ABORTIFHUNG: Windows only flags a window "hung" after five
+    /// seconds without pumping, which would hide every shorter freeze. Waiting
+    /// our own 200 ms catches sub-second stalls that a user still feels.
+    pub fn probe(pid: u32, timeout_ms: u32) -> UiReply {
+        let Some(hwnd) = handle(pid) else {
+            return UiReply::Unavailable;
+        };
+        let mut result = 0_usize;
+        unsafe { SetLastError(0) };
+        let started = Instant::now();
+        let ok = unsafe { SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, 0, timeout_ms, &mut result) };
+        if ok != 0 {
+            let ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+            return UiReply::Replied(ms);
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            // A stale handle or an integrity-level mismatch reports on access,
+            // not on load, so never turn it into a stall claim.
+            Some(ERROR_INVALID_WINDOW_HANDLE) | Some(ERROR_ACCESS_DENIED) => {
+                invalidate();
+                UiReply::Unavailable
+            }
+            // ERROR_TIMEOUT (1460) is the documented result; a few builds
+            // leave the error at 0 for the same outcome.
+            _ => UiReply::Stalled(timeout_ms),
+        }
+    }
+
+    #[cfg(test)]
+    mod probe_tests {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        use super::UiReply;
+
+        const WS_POPUP: u32 = 0x8000_0000;
+        const WS_VISIBLE: u32 = 0x1000_0000;
+        const PM_REMOVE: u32 = 0x0001;
+
+        /// MSG is never inspected, so a padded buffer avoids layout guessing.
+        #[repr(C, align(8))]
+        struct Msg([u8; 64]);
+
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn CreateWindowExW(
+                ex_style: u32,
+                class: *const u16,
+                name: *const u16,
+                style: u32,
+                x: i32,
+                y: i32,
+                w: i32,
+                h: i32,
+                parent: isize,
+                menu: isize,
+                instance: isize,
+                param: *mut core::ffi::c_void,
+            ) -> isize;
+            fn DestroyWindow(hwnd: isize) -> i32;
+            fn PeekMessageW(msg: *mut Msg, hwnd: isize, min: u32, max: u32, remove: u32) -> i32;
+            fn TranslateMessage(msg: *const Msg) -> i32;
+            fn DispatchMessageW(msg: *const Msg) -> isize;
+        }
+
+        /// A window that pumps on demand and then freezes is the only honest
+        /// way to check both branches: a real target never hangs when asked.
+        #[test]
+        #[ignore = "needs an interactive Windows desktop"]
+        fn probe_separates_pumping_from_frozen() {
+            let (tx, rx) = mpsc::channel();
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let thread_stop = stop.clone();
+
+            let worker = std::thread::spawn(move || {
+                let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+                let title: Vec<u16> = "cad-pulse probe target\0".encode_utf16().collect();
+                let hwnd = unsafe {
+                    CreateWindowExW(
+                        0,
+                        class.as_ptr(),
+                        title.as_ptr(),
+                        WS_POPUP | WS_VISIBLE,
+                        0,
+                        0,
+                        200,
+                        120,
+                        0,
+                        0,
+                        0,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if hwnd == 0 {
+                    return;
+                }
+                let _ = tx.send(hwnd);
+                let mut msg = Msg([0; 64]);
+                while !thread_stop.load(Ordering::Relaxed) {
+                    while unsafe { PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) } != 0 {
+                        unsafe {
+                            TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                // The freeze: sit in a blocking sleep without retrieving messages.
+                std::thread::sleep(Duration::from_millis(2500));
+                unsafe { DestroyWindow(hwnd) };
+            });
+
+            let pid = std::process::id();
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("window was not created");
+            std::thread::sleep(Duration::from_millis(200));
+
+            match super::probe(pid, 500) {
+                UiReply::Replied(ms) => assert!(ms < 500, "latency {ms} ms exceeded the budget"),
+                other => panic!("pumping window was not detected: {other:?}"),
+            }
+
+            stop.store(true, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(super::probe(pid, 150), UiReply::Stalled(150));
+
+            worker.join().expect("worker thread");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod window_probe {
+    use super::UiReply;
+
+    pub fn probe(_pid: u32, _timeout_ms: u32) -> UiReply {
+        UiReply::Unavailable
+    }
+}
+
+#[cfg(test)]
+mod stall_tests {
+    use super::StallTracker;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn stall_counts_from_first_miss_and_clears_on_reply() {
+        let start = Instant::now();
+        let mut tracker = StallTracker::default();
+        // One missed probe is jitter, not a stall.
+        assert_eq!(tracker.record(false, start), 0);
+        assert_eq!(tracker.record(false, start + Duration::from_secs(1)), 1);
+        assert_eq!(tracker.record(false, start + Duration::from_secs(3)), 3);
+        assert_eq!(
+            tracker.record(false, start + Duration::from_millis(4_500)),
+            4
+        );
+        // A reply closes the run, and the next miss starts from zero again.
+        assert_eq!(tracker.record(true, start + Duration::from_secs(5)), 0);
+        assert_eq!(tracker.record(false, start + Duration::from_secs(6)), 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Hybrid CPU topology (Windows)
 // EfficiencyClass is per physical core; its group affinity maps that class to
 // each logical processor. This avoids brittle core-index or model-name guesses.
@@ -773,6 +1097,8 @@ fn demo_payload(start: &Instant, cpu_model: &str) -> StatsPayload {
         core_types.len()
     };
     let busiest_index = core_count / 3;
+    // A freeze every 90 s so the stall UI can be inspected without AutoCAD.
+    let stalled = (t % 90.0) > 82.0;
     StatsPayload {
         running: true,
         demo: true,
@@ -783,6 +1109,17 @@ fn demo_payload(start: &Instant, cpu_model: &str) -> StatsPayload {
         busiest_thread_pct: Some((cpu * 0.92 + 5.0).clamp(0.0, 100.0) as f32),
         busiest_thread_id: Some(4243),
         thread_count: 24,
+        ui_responsive: Some(!stalled),
+        ui_response_ms: Some(if stalled {
+            UI_PROBE_TIMEOUT_MS
+        } else {
+            (2.0 + 4.0 * (t * 1.3).sin().abs()) as u32
+        }),
+        ui_stall_sec: if stalled {
+            ((t % 90.0) - 82.0) as u64
+        } else {
+            0
+        },
         // Demo load follows the machine's actual logical-core topology.
         cores: (0..core_count)
             .map(|i| {
@@ -853,6 +1190,7 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
         let mut cached_pid: Option<Pid> = None;
         let mut last_io: Option<(Instant, u64, u64)> = None;
         let mut thread_cpu = ThreadCpuSampler::default();
+        let mut stall = StallTracker::default();
         let demo_start = Instant::now();
 
         loop {
@@ -866,6 +1204,7 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
                 cached_pid = None;
                 last_io = None;
                 thread_cpu.reset();
+                stall.reset();
                 let payload = demo_payload(&demo_start, &cpu_model);
                 let _ = app.emit("perf-tick", &payload);
                 tray::update(&app, &payload);
@@ -942,6 +1281,22 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
                     };
                     last_io = Some((now, du.total_read_bytes, du.total_written_bytes));
                     let thread = thread_cpu.sample(pid.as_u32());
+                    // Ask the UI thread whether it is still pumping messages.
+                    // Load numbers describe work done; only this describes work
+                    // that cannot start.
+                    let (ui_responsive, ui_response_ms) =
+                        match window_probe::probe(pid.as_u32(), UI_PROBE_TIMEOUT_MS) {
+                            UiReply::Replied(ms) => (Some(true), Some(ms)),
+                            UiReply::Stalled(ms) => (Some(false), Some(ms)),
+                            UiReply::Unavailable => (None, None),
+                        };
+                    let ui_stall_sec = match ui_responsive {
+                        Some(false) => stall.record(false, Instant::now()),
+                        _ => {
+                            stall.reset();
+                            0
+                        }
+                    };
                     StatsPayload {
                         running: true,
                         demo: false,
@@ -952,6 +1307,9 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
                         busiest_thread_pct: thread.busiest_pct,
                         busiest_thread_id: thread.busiest_id,
                         thread_count: thread.count,
+                        ui_responsive,
+                        ui_response_ms,
+                        ui_stall_sec,
                         cores: cores.clone(),
                         core_types: core_types.clone(),
                         cpu_model: cpu_model.clone(),
@@ -973,6 +1331,7 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
                 None => {
                     last_io = None;
                     thread_cpu.reset();
+                    stall.reset();
                     StatsPayload {
                         running: false,
                         demo: false,
@@ -983,6 +1342,9 @@ pub fn spawn(app: AppHandle, state: Arc<SamplerState>) {
                         busiest_thread_pct: None,
                         busiest_thread_id: None,
                         thread_count: 0,
+                        ui_responsive: None,
+                        ui_response_ms: None,
+                        ui_stall_sec: 0,
                         cores: cores.clone(),
                         core_types: core_types.clone(),
                         cpu_model: cpu_model.clone(),

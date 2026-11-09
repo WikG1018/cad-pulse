@@ -1,8 +1,8 @@
 {
   "name": "cad-pulse",
   "private": true,
-  "version": "0.3.0",
-  "description": "Always-on-top performance monitor for AutoCAD — tray, persistent status bar, HUD and diagnostics",
+  "version": "0.4.0",
+  "description": "Always-on-top performance monitor for AutoCAD — tray, persistent status bar, HUD, diagnostics and UI responsiveness",
   "license": "MIT",
   "repository": {
     "type": "git",

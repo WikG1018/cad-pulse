@@ -6,7 +6,7 @@ import { useGlass } from "../hooks/useGlass";
 import { diagnose } from "../diagnose";
 import { diagnosisText, useLanguage, type Language, type Messages } from "../i18n";
 import { useEventLog, EventLogView } from "../components/EventLog";
-import { fmtPct, fmtMem, fmtBps, fmtUptime, fmtFreq, tempColor, coreColor, gpuLoadColor, memoryColor, type Stats } from "../types";
+import { fmtPct, fmtMem, fmtBps, fmtUptime, fmtFreq, fmtLatency, tempColor, coreColor, gpuLoadColor, memoryColor, uiColor, type Stats } from "../types";
 import MetricCard from "../components/MetricCard";
 import CoreBars from "../components/CoreBars";
 import Icon, { BrandMark } from "../components/Icons";
@@ -52,6 +52,12 @@ export default function Dashboard() {
   const gpuColor = gpuLoadColor(latest.gpu_pct ?? 0);
   const gpuModel = latest.gpu_model ?? t.dash.noNvidia;
   const cpuModel = latest.cpu_model || t.dash.unknownCpu;
+  const uiTone = uiColor(latest.ui_responsive, latest.ui_stall_sec);
+  const uiText = latest.ui_responsive == null
+    ? t.dash.uiUnmeasured
+    : latest.ui_responsive
+      ? `${t.dash.uiOk} · ${fmtLatency(latest.ui_response_ms ?? 0)}`
+      : `${t.dash.uiStalled} · ${latest.ui_stall_sec} s`;
 
   const copySummary = async () => {
     try {
@@ -155,7 +161,7 @@ export default function Dashboard() {
               <div className="section-heading"><div className="diagnosis-title"><span className={`status-dot ${latest.running ? diag.tone : "muted"}`} /><h2>{latest.running ? diagText.title : t.common.waiting}</h2></div><span className="section-kicker">{t.dash.smartDiagnosis}</span></div>
               <div className="diagnosis-content">
                 {diagText.advice.length > 0 && latest.running ? <ul className="diag-advice">{diagText.advice.map((advice) => <li key={advice}>{advice}</li>)}</ul> : <p className="diagnosis-ok">{latest.running ? t.dash.noBottleneck : t.dash.launchToAnalyze}</p>}
-                <div className="process-facts"><span>{t.dash.diskRead}<b className="num">{latest.running ? fmtBps(latest.io_read_bps) : "—"}</b></span><span>{t.dash.diskWrite}<b className="num">{latest.running ? fmtBps(latest.io_write_bps) : "—"}</b></span><span>{t.dash.uptime}<b className="num">{latest.running ? fmtUptime(latest.uptime_sec) : "—"}</b></span></div>
+                <div className="process-facts"><span title={t.dash.uiResponse}>{t.dash.uiResponse}<b className="num" style={{ color: uiTone }}>{latest.running ? uiText : "—"}</b></span><span>{t.dash.diskRead}<b className="num">{latest.running ? fmtBps(latest.io_read_bps) : "—"}</b></span><span>{t.dash.diskWrite}<b className="num">{latest.running ? fmtBps(latest.io_write_bps) : "—"}</b></span><span>{t.dash.uptime}<b className="num">{latest.running ? fmtUptime(latest.uptime_sec) : "—"}</b></span></div>
               </div>
               <div className="command-section"><h3>{t.dash.quickCommands}</h3><div className="command-grid"><CheatItem cmd="-PURGE" desc={t.commands.purge} /><CheatItem cmd="SCALELISTEDIT" desc={t.commands.scale} /><CheatItem cmd="AUDIT" desc={t.commands.audit} /><CheatItem cmd="GFXDX12=0" desc={t.commands.dx11} /><CheatItem cmd="LAYOUTREGENCTL=1" desc={t.commands.layout} /><CheatItem cmd={t.commands.proxyCommand} desc={t.commands.proxy} /></div></div>
             </section>
@@ -209,6 +215,7 @@ function buildSummary(
     `${t.summary.hardware}: ${s.cpu_model || t.dash.unknownCpu} (${topologyText(s, t)}) · ${s.gpu_model ?? t.summary.unavailable}`,
     `${t.summary.cpu}: ${fmtPct(s.cpu_single_pct)}% / ${t.summary.normalized} ${fmtPct(s.cpu_total_pct)}% · ${t.summary.busiestCore} ${fmtPct(s.busiest_core_pct)}% · ${fmtFreq(s.cpu_freq_mhz)}`,
     `${t.summary.busiestThread}: ${s.busiest_thread_pct != null ? `${fmtPct(s.busiest_thread_pct)}%` : t.summary.unavailable} · TID ${s.busiest_thread_id ?? "—"} · ${s.thread_count} ${t.summary.threads}`,
+    `${t.summary.ui}: ${s.ui_responsive == null ? t.summary.unavailable : s.ui_responsive ? `${t.dash.uiOk} · ${fmtLatency(s.ui_response_ms ?? 0)}` : `${t.dash.uiStalled} · ${s.ui_stall_sec} s`}`,
     `     ${t.summary.recent5} ${selectedScale} ${t.summary.peak} ${fmtPct(windows.cpu5.peak)}% · ${t.summary.average} ${fmtPct(windows.cpu5.avg)}%`,
     `${t.summary.memory}: ${mem.value} ${mem.unit} · ${t.summary.peak} ${memPeak.value} ${memPeak.unit} · ${t.summary.systemAvailable} ${available.value} ${available.unit}`,
     `${t.summary.gpuGlobal}: ${gpu}`,

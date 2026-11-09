@@ -10,6 +10,9 @@ export interface Stats {
   busiest_thread_pct: number | null;
   busiest_thread_id: number | null;
   thread_count: number;
+  ui_responsive: boolean | null;
+  ui_response_ms: number | null;
+  ui_stall_sec: number;
   cores: number[];
   core_types: CoreType[];
   cpu_model: string;
@@ -57,8 +60,23 @@ export function tempColor(c: number): string {
   return "#72c6a5";
 }
 
+/**
+ * UI responsiveness scale. A short first miss stays amber so a single late
+ * reply is not painted as a freeze; five seconds is a real hang.
+ */
+export function uiColor(responsive: boolean | null, stallSec: number): string {
+  if (responsive === false) return stallSec >= 5 ? "#f08b82" : "#efbd72";
+  if (responsive === true) return "#72c6a5";
+  return "#8d99ac";
+}
+
 export function fmtPct(v: number): string {
   return Math.round(v).toString();
+}
+
+/** A healthy pump answers in well under a millisecond, so 0 ms reads as a bug. */
+export function fmtLatency(ms: number): string {
+  return ms < 1 ? "<1 ms" : `${ms} ms`;
 }
 
 export function fmtMem(mb: number): { value: string; unit: string } {

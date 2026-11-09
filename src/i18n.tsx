@@ -57,6 +57,9 @@ const zh = {
     idle: "待机",
     statusBarAria: "常驻性能状态条",
     processCpuAria: "AutoCAD 进程 CPU（核当量）",
+    stallShort: "无响应",
+    stallAria: "AutoCAD 界面无响应已持续",
+    responseShort: "界面",
   },
   dash: {
     overview: "性能概览",
@@ -106,6 +109,10 @@ const zh = {
     diskRead: "磁盘读取",
     diskWrite: "磁盘写入",
     uptime: "运行时长",
+    uiResponse: "界面响应",
+    uiOk: "正常",
+    uiStalled: "无响应",
+    uiUnmeasured: "未测量",
     quickCommands: "图纸卡顿速查",
     eventLog: "事件日志",
     stored80: "本机保存最近 80 条",
@@ -127,6 +134,8 @@ const zh = {
     idleTitle: "等待 AutoCAD…",
     idleAdvice: "启动 AutoCAD 后自动开始监控",
     threadTitle: "AutoCAD 最忙线程持续高负载 — 可能存在单线程计算瓶颈",
+    stallTitle: "AutoCAD 界面无响应 — 界面线程已停止处理消息",
+    stallAdvice: "CPU 同时不高说明卡在等待；CPU 同时满载则是计算耗时导致的假死",
     cpuTitle: "CPU 持续高负载 — 可能存在计算瓶颈",
     cpuAdvice: [
       "图纸清理：-PURGE（选 Regapps 输入 *）→ SCALELISTEDIT 重置 → AUDIT",
@@ -159,6 +168,7 @@ const zh = {
     stop: "AutoCAD 已关闭",
     cpu: "进程 CPU 持续高负载 {value}%（核当量）",
     thread: "AutoCAD 最忙线程持续高负载 {value}%",
+    stall: "AutoCAD 界面无响应 {value} 秒",
     gpu: "GPU 负载 {value}% — 渲染管线繁忙",
     mem: "系统可用内存仅 {value} GB",
     empty: "暂无事件 — 启动 AutoCAD 或触发负载后自动记录",
@@ -182,6 +192,7 @@ const zh = {
     normalized: "总量口径",
     busiestCore: "最忙核",
     busiestThread: "AutoCAD 最忙线程",
+    ui: "界面响应",
     threads: "线程",
     recent5: "近 5 分钟",
     peak: "峰值",
@@ -247,6 +258,9 @@ const en: Messages = {
     idle: "Idle",
     statusBarAria: "Persistent performance status bar",
     processCpuAria: "AutoCAD process CPU (core-equivalent)",
+    stallShort: "Stalled",
+    stallAria: "AutoCAD UI unresponsive for",
+    responseShort: "UI",
   },
   dash: {
     overview: "Performance overview",
@@ -296,6 +310,10 @@ const en: Messages = {
     diskRead: "Disk read",
     diskWrite: "Disk write",
     uptime: "Uptime",
+    uiResponse: "UI response",
+    uiOk: "OK",
+    uiStalled: "No reply",
+    uiUnmeasured: "Unmeasured",
     quickCommands: "Drawing lag quick reference",
     eventLog: "Event log",
     stored80: "Latest 80 events stored locally",
@@ -317,6 +335,8 @@ const en: Messages = {
     idleTitle: "Waiting for AutoCAD…",
     idleAdvice: "Launch AutoCAD to start monitoring automatically",
     threadTitle: "AutoCAD thread saturated — possible single-thread compute bottleneck",
+    stallTitle: "AutoCAD is not responding — its UI thread stopped pumping messages",
+    stallAdvice: "Low CPU here means a blocking wait; saturated CPU means the freeze is compute time",
     cpuTitle: "Sustained high CPU — possible compute bottleneck",
     cpuAdvice: [
       "Clean: -PURGE (Regapps, *) → reset SCALELISTEDIT → AUDIT",
@@ -349,6 +369,7 @@ const en: Messages = {
     stop: "AutoCAD closed",
     cpu: "Sustained process CPU {value}% (core-equivalent)",
     thread: "Sustained AutoCAD busiest-thread CPU {value}%",
+    stall: "AutoCAD UI unresponsive for {value} s",
     gpu: "GPU load {value}% — rendering pipeline busy",
     mem: "Only {value} GB system memory available",
     empty: "No events — launch AutoCAD or generate load to start recording",
@@ -372,6 +393,7 @@ const en: Messages = {
     normalized: "normalized",
     busiestCore: "busiest system core",
     busiestThread: "AutoCAD busiest thread",
+    ui: "UI response",
     threads: "threads",
     recent5: "Last 5 min",
     peak: "peak",
@@ -466,6 +488,7 @@ export function useLanguage(): LanguageContextValue {
 export function diagnosisText(t: Messages, level: DiagLevel): { title: string; advice: string[] } {
   switch (level) {
     case "idle": return { title: t.diag.idleTitle, advice: [t.diag.idleAdvice] };
+    case "stall": return { title: t.diag.stallTitle, advice: [t.diag.stallAdvice, ...t.diag.waitAdvice] };
     case "thread": return { title: t.diag.threadTitle, advice: t.diag.cpuAdvice };
     case "cpu": return { title: t.diag.cpuTitle, advice: t.diag.cpuAdvice };
     case "mem": return { title: t.diag.memTitle, advice: t.diag.memAdvice };

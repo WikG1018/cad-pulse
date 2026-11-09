@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLanguage, type Messages, type Language } from "../i18n";
 import type { Stats } from "../types";
 
-export type EventKind = "start" | "stop" | "cpu" | "thread" | "gpu" | "mem" | "demo";
+export type EventKind = "start" | "stop" | "cpu" | "thread" | "stall" | "gpu" | "mem" | "demo";
 export interface LogEvent {
   ts: number;
   kind: EventKind;
@@ -17,11 +17,12 @@ const COOLDOWN_MS: Record<EventKind, number> = {
   stop: 0,
   cpu: 60_000,
   thread: 60_000,
+  stall: 60_000,
   gpu: 60_000,
   mem: 120_000,
   demo: 0,
 };
-const KINDS: EventKind[] = ["start", "stop", "cpu", "thread", "gpu", "mem", "demo"];
+const KINDS: EventKind[] = ["start", "stop", "cpu", "thread", "stall", "gpu", "mem", "demo"];
 
 function firstNumber(text: string): number | undefined {
   const match = text.match(/\d+(?:\.\d+)?/);
@@ -61,6 +62,7 @@ const TONE: Record<EventKind, string> = {
   stop: "muted",
   cpu: "danger",
   thread: "danger",
+  stall: "danger",
   gpu: "warn",
   mem: "warn",
   demo: "muted",
@@ -70,8 +72,14 @@ function formatEvent(event: LogEvent, t: Messages): string {
   if (event.kind === "start") return event.value != null ? `${t.events.start} · PID ${event.value}` : t.events.start;
   if (event.kind === "stop") return t.events.stop;
   if (event.value == null) return event.legacyText ?? event.kind;
-  const template = event.kind === "cpu" ? t.events.cpu : event.kind === "thread" ? t.events.thread : event.kind === "gpu" ? t.events.gpu : event.kind === "mem" ? t.events.mem : "{value}";
-  return template.replace("{value}", String(event.value));
+  const templates: Partial<Record<EventKind, string>> = {
+    cpu: t.events.cpu,
+    thread: t.events.thread,
+    stall: t.events.stall,
+    gpu: t.events.gpu,
+    mem: t.events.mem,
+  };
+  return (templates[event.kind] ?? "{value}").replace("{value}", String(event.value));
 }
 
 const time = (ts: number, lang: Language) =>
@@ -132,6 +140,8 @@ export function useEventLog(history: Stats[]): LogEvent[] {
 
     if ((s.gpu_pct ?? 0) >= 60) push("gpu", Math.round(s.gpu_pct ?? 0));
     if (s.sys_mem_avail_mb < 2048) push("mem", Number((s.sys_mem_avail_mb / 1024).toFixed(1)));
+    // Only a measured freeze is logged: an unmeasured probe stays silent.
+    if (s.ui_stall_sec >= 3) push("stall", s.ui_stall_sec);
   }, [history]);
 
   return events;

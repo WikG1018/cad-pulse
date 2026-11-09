@@ -1,5 +1,29 @@
 # Changelog / 更新日志
 
+## v0.4.0 (2026-11-09)
+
+### UI responsiveness probe / 界面响应性探针
+- 新增只读响应性探针：向 `acad.exe` 主框架窗口发送 `WM_NULL` 并测量往返延迟，直接判断界面线程是否仍在处理消息。整个过程不向 AutoCAD 写入任何内容。
+- Added a read-only responsiveness probe: a `WM_NULL` round trip to the acad.exe main frame reveals whether the UI thread is still pumping messages. Nothing is written to AutoCAD.
+- 窗口句柄按 PID 缓存并用 `IsWindow` 校验。这不只是省开销：实测界面冻结时 `EnumWindows` 不再返回该窗口，每次重新枚举会把最该报告的故障判成“不可用”。
+- The handle is cached per PID and validated with `IsWindow`. This is not just an optimization: a frozen window stops being enumerated, so re-scanning every tick would turn the very failure worth reporting into "unavailable".
+- 刻意不使用 `SMTO_ABORTIFHUNG`：Windows 需连续 5 秒不泵消息才标记挂起，会漏掉用户能感知的短冻结；探针自设 200 ms 上限，把自身阻塞限制在每秒一次短调用。
+- Deliberately no `SMTO_ABORTIFHUNG`: Windows only flags a window hung after five seconds without pumping, which hides shorter freezes a user still feels. The probe bounds itself at 200 ms, one short call per tick.
+- 新增 `ui_responsive` / `ui_response_ms` / `ui_stall_sec` 三个字段。“未测量”（无窗口、权限不足、非 Windows）与“无响应”严格区分，缺数据不下结论。
+- Added `ui_responsive` / `ui_response_ms` / `ui_stall_sec`. "Not measured" (no window, access denied, non-Windows) stays distinct from "not responding", and missing data never becomes a verdict.
+
+### Diagnosis and presentation / 诊断与展示
+- 新增 `stall` 诊断级别，优先级高于所有负载规则：连续 2 秒未响应给出警告，5 秒转为危险。建议首条明确“CPU 同时不高 = 卡在等待，CPU 同时满载 = 计算导致的假死”。
+- A new `stall` level outranks every load rule: two seconds of missed probes warns, five seconds turns critical. Leading advice states plainly that low CPU alongside means a blocking wait, saturated CPU means the freeze is compute time.
+- 有探针数据时，低负载不再被推测为“等待型卡顿”，直接判定运行正常——此前这条结论无法证实。
+- With probe data present, low load is no longer guessed as wait-type lag; it reads as healthy idle.
+- 状态条在卡顿期间把频率位让给“无响应 N 秒”，保持 360×48 不变；Dashboard 诊断面板新增“界面响应”、事件日志新增 `stall` 事件、复制摘要新增一行、托盘 tooltip 与托盘图标同步反映（无响应时进度环转红）。
+- While frozen the status bar lends its frequency slot to the stall age without changing the 360×48 footprint. The dashboard gains a UI-response figure, the event log a `stall` event, the copied summary a line, and the tray tooltip plus icon follow (the ring turns red).
+
+### Verification / 验证
+- 新增探针集成测试（默认 `#[ignore]`，需要交互桌面）：自建窗口先正常泵消息再冻结，分别断言“有应答”与“超时”，覆盖两条分支。
+- Added a probe integration test, ignored by default because it needs an interactive desktop: it owns a window, pumps it, then freezes it, asserting both the replied and the timed-out branch.
+
 ## v0.3.0 (2026-11-09)
 
 ### Persistent status bar / 常驻状态条

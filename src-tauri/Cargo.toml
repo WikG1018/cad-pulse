@@ -1,7 +1,7 @@
 [package]
 name = "cad-pulse"
-version = "0.3.0"
-description = "Always-on-top performance monitor for AutoCAD with tray, status bar, HUD, diagnostics and busiest-thread CPU"
+version = "0.4.0"
+description = "Always-on-top performance monitor for AutoCAD with tray, status bar, HUD, diagnostics, busiest-thread CPU and UI responsiveness"
 authors = ["WikG1018"]
 license = "MIT"
 repository = "https://github.com/WikG1018/cad-pulse"

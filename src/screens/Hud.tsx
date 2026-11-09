@@ -6,7 +6,7 @@ import { useStats, series } from "../hooks/useStats";
 import { useGlass } from "../hooks/useGlass";
 import { diagnose } from "../diagnose";
 import { diagnosisText, useLanguage } from "../i18n";
-import { fmtPct, fmtMem, coreColor, gpuLoadColor, memoryColor } from "../types";
+import { fmtPct, fmtMem, fmtLatency, coreColor, gpuLoadColor, memoryColor, uiColor } from "../types";
 import Sparkline from "../components/Sparkline";
 import Ring from "../components/Ring";
 import Icon, { BrandMark } from "../components/Icons";
@@ -60,6 +60,12 @@ export default function Hud() {
   const gpuColor = gpuLoadColor(latest.gpu_pct ?? 0);
   const memColor = memoryColor(latest.sys_mem_avail_mb);
   const miniMem = latest.running ? mem : available;
+  const stalled = latest.ui_responsive === false;
+  const uiLabel = latest.ui_responsive == null
+    ? t.dash.uiUnmeasured
+    : stalled
+      ? `${t.dash.uiStalled} ${latest.ui_stall_sec}s`
+      : `${t.dash.uiOk} ${fmtLatency(latest.ui_response_ms ?? 0)}`;
 
   if (collapsed) {
     return (
@@ -75,8 +81,14 @@ export default function Hud() {
           </div>
           <MiniStat label="GPU" value={latest.gpu_pct == null ? "—" : fmtPct(latest.gpu_pct)} unit={latest.gpu_pct == null ? undefined : "%"} color={latest.gpu_pct == null ? undefined : gpuColor} />
           <MiniStat label={latest.running ? t.hud.memoryShort : t.hud.availableShort} value={miniMem.value} unit={miniMem.unit} color={memColor} title={latest.running ? t.hud.autocadMemory : t.hud.systemAvailable} />
-          <MiniStat label={t.hud.frequencyShort} value={latest.cpu_freq_mhz > 0 ? (latest.cpu_freq_mhz / 1000).toFixed(2) : "—"} unit={latest.cpu_freq_mhz > 0 ? "GHz" : undefined} />
-          <span className={`status-dot ${latest.running ? diag.tone : "muted"}`} title={latest.running ? diagText.title : t.common.notRunning} />
+          {/* During a freeze the stall age matters more than the clock, so it
+              takes the same slot instead of widening the 360 px bar. */}
+          {stalled ? (
+            <MiniStat label={t.hud.stallShort} value={String(latest.ui_stall_sec)} unit="s" color={uiColor(false, latest.ui_stall_sec)} title={t.hud.stallAria} />
+          ) : (
+            <MiniStat label={t.hud.frequencyShort} value={latest.cpu_freq_mhz > 0 ? (latest.cpu_freq_mhz / 1000).toFixed(2) : "—"} unit={latest.cpu_freq_mhz > 0 ? "GHz" : undefined} />
+          )}
+          <span className={`status-dot ${latest.running ? diag.tone : "muted"}`} title={latest.running ? `${diagText.title} · ${uiLabel}` : t.common.notRunning} />
           <button className="icon-btn" title={t.common.expand} aria-label={t.common.expand} onClick={() => setCollapsed(false)}><Icon name="expand" /></button>
         </div>
       </div>
@@ -87,7 +99,7 @@ export default function Hud() {
     <div className={cls}>
       <div className="hud-root">
         <HudHeader demo={latest.demo} onCollapse={() => setCollapsed(true)} />
-        <button className="hud-status" onClick={() => invoke("open_dashboard")} title={t.common.openDashboard}>
+        <button className="hud-status" onClick={() => invoke("open_dashboard")} title={`${t.common.openDashboard} · ${uiLabel}`}>
           <span className={`status-dot ${latest.running ? diag.tone : "muted"}`} />
           <span>{latest.running ? diagText.title : t.hud.waitingTitle}</span>
           <span className="hud-status-link">{t.common.details} <Icon name="arrow" size={12} /></span>

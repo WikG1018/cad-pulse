@@ -1,6 +1,6 @@
 import type { Stats } from "./types";
 
-export type DiagLevel = "idle" | "ok" | "thread" | "cpu" | "gpu" | "wait" | "mem";
+export type DiagLevel = "idle" | "ok" | "stall" | "thread" | "cpu" | "gpu" | "wait" | "mem";
 export type Tone = "ok" | "warn" | "danger" | "muted";
 
 export interface Diagnosis {
@@ -28,6 +28,17 @@ export function diagnose(history: Stats[]): Diagnosis {
   const peakGpu = peak((s) => s.gpu_pct ?? 0);
   const minAvail = Math.min(...vals((s) => s.sys_mem_avail_mb));
 
+  // A missed message pump is direct evidence, unlike any load reading, so it
+  // outranks every other rule. It is also a live state, not a peak: a freeze
+  // that ended twenty seconds ago must stop headlining the verdict, and a
+  // demo-to-real switch must not inherit the demo's freezes. `ui_stall_sec`
+  // only counts the current uninterrupted run, and clears on the first reply.
+  // Requiring two seconds filters single-probe jitter while still catching
+  // freezes long before Windows paints "Not responding".
+  if (last.ui_stall_sec >= 2) {
+    return { level: "stall", tone: last.ui_stall_sec >= 5 ? "danger" : "warn" };
+  }
+
   // A sustained per-thread reading supports a single-thread compute hint, but
   // still does not prove that this is AutoCAD's main thread. Process and system
   // metrics remain separate; the older process/core rule is only a fallback
@@ -40,6 +51,10 @@ export function diagnose(history: Stats[]): Diagnosis {
   }
   if (minAvail < 2048) return { level: "mem", tone: "warn" };
   if (peakGpu >= 60) return { level: "gpu", tone: "warn" };
-  if (avgCpu < 30 && peakGpu < 40) return { level: "wait", tone: "warn" };
+
+  // Once the probe has answered, low load plus a live message pump is simply
+  // healthy idle: reporting "wait-type lag" there was a guess, not a finding.
+  const probed = win.some((s) => s.ui_responsive != null);
+  if (!probed && avgCpu < 30 && peakGpu < 40) return { level: "wait", tone: "warn" };
   return { level: "ok", tone: "ok" };
 }

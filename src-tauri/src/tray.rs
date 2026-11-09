@@ -68,7 +68,7 @@ pub fn init(
     *handles.quit_item.lock().unwrap() = Some(quit.clone());
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(draw_icon(0.0, false))
+        .icon(draw_icon(0.0, false, false))
         .tooltip("CAD Pulse — 等待 AutoCAD…")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -180,7 +180,11 @@ pub fn update(app: &AppHandle, p: &StatsPayload) {
     } else {
         0.0
     };
-    let _ = tray.set_icon(Some(draw_icon(pct, p.running)));
+    let _ = tray.set_icon(Some(draw_icon(
+        pct,
+        p.running,
+        p.ui_responsive == Some(false),
+    )));
     let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     if tick.is_multiple_of(2) {
         let _ = tray.set_tooltip(Some(tooltip_text(p)));
@@ -213,20 +217,48 @@ fn tooltip_text(p: &StatsPayload) -> String {
         .busiest_thread_pct
         .map(|pct| format!("{pct:.0}%"))
         .unwrap_or_else(|| if english { "unavailable" } else { "不可用" }.into());
+    // Only the probe can say whether the UI thread is still pumping; load
+    // numbers cannot. Keep "unmeasured" distinct from "wrong".
+    let ui = match p.ui_responsive {
+        Some(true) => {
+            // A healthy pump answers below a millisecond; print that honestly.
+            let ms = p.ui_response_ms.unwrap_or(0);
+            let latency = if ms < 1 {
+                "<1 ms".to_string()
+            } else {
+                format!("{ms} ms")
+            };
+            if english {
+                format!("OK {latency}")
+            } else {
+                format!("正常 {latency}")
+            }
+        }
+        Some(false) => {
+            if english {
+                format!("NOT RESPONDING {} s", p.ui_stall_sec)
+            } else {
+                format!("无响应 {} 秒", p.ui_stall_sec)
+            }
+        }
+        None => if english { "unmeasured" } else { "未测量" }.to_string(),
+    };
     if english {
         format!(
-            "CAD Pulse\nCPU   {:.0}% (core-equivalent; 100% = one core)\nThread  {} (busiest AutoCAD thread)\nMemory  {}\nGPU   {}\nUptime  {}",
+            "CAD Pulse\nCPU   {:.0}% (core-equivalent; 100% = one core)\nThread  {} (busiest AutoCAD thread)\nUI    {}\nMemory  {}\nGPU   {}\nUptime  {}",
             p.cpu_single_pct,
             thread,
+            ui,
             format_mb(p.mem_mb),
             gpu,
             format_uptime(p.uptime_sec),
         )
     } else {
         format!(
-            "CAD Pulse\nCPU   {:.0}%（进程核当量，100% = 1 核工作量）\n线程  {}（AutoCAD 最忙线程）\n内存  {}\nGPU   {}\n运行  {}",
+            "CAD Pulse\nCPU   {:.0}%（进程核当量，100% = 1 核工作量）\n线程  {}（AutoCAD 最忙线程）\n界面  {}\n内存  {}\nGPU   {}\n运行  {}",
             p.cpu_single_pct,
             thread,
+            ui,
             format_mb(p.mem_mb),
             gpu,
             format_uptime(p.uptime_sec),
@@ -259,7 +291,7 @@ fn format_uptime(s: u64) -> String {
 
 const ICON_SIZE: u32 = 32;
 
-pub fn draw_icon(pct: f32, running: bool) -> tauri::image::Image<'static> {
+pub fn draw_icon(pct: f32, running: bool, stalled: bool) -> tauri::image::Image<'static> {
     let mut pm = tiny_skia::Pixmap::new(ICON_SIZE, ICON_SIZE).expect("pixmap");
     let (cx, cy, r) = (16.0_f32, 16.0_f32, 11.0_f32);
 
@@ -268,10 +300,12 @@ pub fn draw_icon(pct: f32, running: bool) -> tauri::image::Image<'static> {
     stroke(
         &mut pm,
         &track,
-        if running {
-            (130, 169, 255, 70)
-        } else {
+        if !running {
             (110, 110, 130, 60)
+        } else if stalled {
+            (248, 113, 113, 80)
+        } else {
+            (130, 169, 255, 70)
         },
         5.0,
     );
@@ -280,7 +314,10 @@ pub fn draw_icon(pct: f32, running: bool) -> tauri::image::Image<'static> {
     if running && pct > 1.0 {
         let sweep = 360.0 * pct.clamp(0.0, 100.0) / 100.0;
         let arc = arc_path(cx, cy, r, -90.0, sweep);
-        let color = if pct < 50.0 {
+        // A frozen UI is the state worth noticing, so it wins over load colour.
+        let color = if stalled {
+            (248, 113, 113, 255) // red
+        } else if pct < 50.0 {
             (130, 169, 255, 255) // data blue
         } else if pct < 85.0 {
             (251, 191, 36, 255) // amber
